@@ -1,0 +1,34 @@
+# Layering rules from ARCHITECTURE.md §5, enforced as a build failure rather than a
+# code-review nag. The rule that actually bites: `ml/` and `simulator/` must never
+# import a service, because training and world generation have to run without the
+# platform up.
+[importlinter]
+root_packages =
+    fsa_common
+    fsa_authz
+    fsa_guardrails
+    fsa_telemetry
+    fsa_ml
+    fsa_sim
+    fsa_evals
+
+[importlinter:contract:layers]
+name = Shared packages sit below ml and simulator
+type = layers
+layers =
+    fsa_evals
+    fsa_ml : fsa_sim
+    fsa_authz : fsa_guardrails : fsa_telemetry
+    fsa_common
+
+[importlinter:contract:kernel-is-independent]
+name = fsa_common imports nothing from the rest of the repo
+type = forbidden
+source_modules = fsa_common
+forbidden_modules =
+    fsa_authz
+    fsa_guardrails
+    fsa_telemetry
+    fsa_ml
+    fsa_sim
+    fsa_evals

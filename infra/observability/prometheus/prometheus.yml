@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml      # recording + alerting rules land in M2.5
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Batch jobs (training, drift, delayed-label backfill) push here rather than
+  # being scraped — they do not live long enough for the pull model (§13).
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]

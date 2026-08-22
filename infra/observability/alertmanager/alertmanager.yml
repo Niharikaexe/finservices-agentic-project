@@ -1,0 +1,13 @@
+# Local routing sends everything to a webhook sink so alerts are observable
+# without wiring a real pager. Real routing lands with M2.5.
+route:
+  receiver: local-sink
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 1h
+
+receivers:
+  - name: local-sink
+    webhook_configs:
+      - url: http://host.docker.internal:8099/alerts
+        send_resolved: true

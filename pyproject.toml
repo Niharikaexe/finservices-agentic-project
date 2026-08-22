@@ -1,0 +1,129 @@
+[project]
+name = "argus"
+version = "0.0.0"
+description = "Argus — corporate expense intelligence platform (workspace root)"
+requires-python = ">=3.12"
+# The root package is a meta-package: it exists so `uv sync` installs every
+# workspace member into one editable venv. It ships no code of its own.
+dependencies = [
+  "fsa-common",
+  "fsa-authz",
+  "fsa-guardrails",
+  "fsa-telemetry",
+  "fsa-ml",
+  "fsa-sim",
+  "fsa-evals",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# uv workspace
+# NOTE: `services/*` are deliberately NOT workspace members yet — see
+# docs/adr/0003-services-outside-the-root-venv.md. They land as members when
+# M1 gives them real code.
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.uv.workspace]
+members = ["packages/*", "ml", "simulator", "evals"]
+
+[tool.uv.sources]
+fsa-common     = { workspace = true }
+fsa-authz      = { workspace = true }
+fsa-guardrails = { workspace = true }
+fsa-telemetry  = { workspace = true }
+fsa-ml         = { workspace = true }
+fsa-sim        = { workspace = true }
+fsa-evals      = { workspace = true }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dependency groups (ARCHITECTURE.md §8).
+# `dev` is installed by `uv sync`; everything else is opt-in via `--group`,
+# so CI can install narrow slices and Docker images stay small.
+# ─────────────────────────────────────────────────────────────────────────────
+[dependency-groups]
+dev = [
+  "ruff>=0.6",
+  "mypy>=1.11",
+  "import-linter>=2.0",
+  "pre-commit",
+  "pytest>=8",
+  "pytest-asyncio",
+  "pytest-cov",
+  "hypothesis",
+  "ipython",
+  "pandas-stubs>=3.0.5.260730",
+]
+core = [
+  "fastapi>=0.115", "uvicorn[standard]", "pydantic>=2.9", "pydantic-settings",
+  "sqlalchemy>=2.0", "alembic", "asyncpg", "psycopg[binary]", "pgvector",
+  "httpx", "tenacity", "structlog", "python-json-logger",
+]
+agent = [
+  "langgraph>=0.2.50", "langgraph-checkpoint-postgres", "langchain-core",
+  "langchain-openai", "langchain-community",
+  "llama-index-core", "llama-index-readers-file",
+  "llama-index-vector-stores-postgres", "llama-index-embeddings-azure-openai",
+  "mcp", "semantic-kernel",
+]
+authz = ["openfga-sdk", "authlib", "python-jose[cryptography]"]
+guards = ["nemoguardrails", "guardrails-ai", "presidio-analyzer", "presidio-anonymizer"]
+ml = [
+  "lightgbm", "scikit-learn", "pandas", "polars", "pyarrow", "numpy",
+  "onnx", "onnxruntime", "skl2onnx", "shap", "optuna",
+  "mlflow", "evidently>=0.4", "statsforecast",
+]
+# NEVER install `gpu` into a service image (CLAUDE.md hard rule).
+gpu = ["torch", "transformers", "peft", "accelerate", "bitsandbytes", "datasets"]
+obs = [
+  "opentelemetry-sdk", "opentelemetry-exporter-otlp",
+  "opentelemetry-instrumentation-fastapi", "opentelemetry-instrumentation-sqlalchemy",
+  "openinference-instrumentation-langchain", "arize-phoenix",
+  "prometheus-client", "prometheus-fastapi-instrumentator",
+]
+eval = ["ragas", "deepeval"]
+sim = ["faker", "mimesis", "locust", "numpy", "scipy"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tooling
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["packages/*/src", "ml/src", "simulator/src", "evals/src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "ARG", "PTH", "RUF"]
+ignore = ["A003"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+mypy_path = "packages/common/src:packages/authz/src:packages/guardrails/src:packages/telemetry/src:ml/src:simulator/src:evals/src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# Third-party libs without stubs. Keep this list short and justified.
+module = ["prometheus_client.*", "lightgbm.*", "shap.*", "mlflow.*", "evidently.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+  "integration: needs docker services (postgres, openfga, redpanda)",
+  "slow: takes more than a few seconds",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["packages", "ml/src", "simulator/src"]

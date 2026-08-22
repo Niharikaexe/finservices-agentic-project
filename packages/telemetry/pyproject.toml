@@ -1,0 +1,16 @@
+[project]
+name = "fsa-telemetry"
+version = "0.0.0"
+description = "Argus telemetry: OTel setup and the Prometheus metric registry"
+requires-python = ">=3.12"
+dependencies = ["fsa-common", "prometheus-client>=0.20"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fsa_telemetry"]
+
+[tool.uv.sources]
+fsa-common = { workspace = true }

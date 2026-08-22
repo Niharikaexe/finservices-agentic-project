@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1"          # fail if uv.lock is stale rather than silently resolving
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      - name: Ruff (lint)
+        run: uv run ruff check --output-format=github .
+
+      - name: Ruff (format)
+        run: uv run ruff format --check .
+
+      # mypy --strict on packages/* is a hard rule (CLAUDE.md). ml/ and simulator/
+      # are included because leakage bugs love loose typing around DataFrames.
+      - name: mypy --strict
+        run: uv run mypy packages ml/src simulator/src
+
+      - name: import-linter (layering)
+        run: uv run lint-imports
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync workspace
+        run: uv sync --frozen
+
+      # No docker services yet, so integration tests are excluded. When M1 adds
+      # testcontainers this becomes a second job with a postgres/openfga service.
+      - name: pytest
+        run: uv run pytest -m "not integration" --cov --cov-report=term-missing

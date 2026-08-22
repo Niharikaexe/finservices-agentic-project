@@ -1,0 +1,37 @@
+# One OTel pipeline, two backends (ARCHITECTURE.md §13):
+#   traces  -> Phoenix   ("why did THIS request go wrong")
+#   metrics -> Prometheus ("is the system healthy right now")
+# Instrument once in the app; the fan-out happens here, not in the SDK.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 75
+
+exporters:
+  otlp/phoenix:
+    endpoint: phoenix:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/phoenix]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]

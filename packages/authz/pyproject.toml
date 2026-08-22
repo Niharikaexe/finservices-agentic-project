@@ -1,0 +1,16 @@
+[project]
+name = "fsa-authz"
+version = "0.0.0"
+description = "Argus authorisation: OpenFGA + OPA clients, filters, decorators"
+requires-python = ">=3.12"
+dependencies = ["fsa-common", "httpx>=0.27"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fsa_authz"]
+
+[tool.uv.sources]
+fsa-common = { workspace = true }

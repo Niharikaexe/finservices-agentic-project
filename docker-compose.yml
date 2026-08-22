@@ -1,0 +1,158 @@
+# Full local stack — ARCHITECTURE.md §7. `make up` for everything,
+# `make up-lite` for postgres + redpanda + phoenix when iterating on the agent.
+#
+# Every service has a healthcheck. That is not decoration: `depends_on:
+# condition: service_healthy` is what stops the API racing Postgres on a cold
+# `make up`, which is the single most common "works on my machine" in this stack.
+
+name: argus
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus      # local only; cloud uses Key Vault + managed identity
+      POSTGRES_DB: argus
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus -d argus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports: ["9092:9092", "9644:9644"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  openfga:
+    image: openfga/openfga:latest
+    command: run
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://argus:argus@postgres:5432/argus?sslmode=disable
+    ports: ["8080:8080", "8081:8081", "3001:3000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr=:8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "/policies"]
+    ports: ["8181:8181"]
+    volumes:
+      - ./infra/opa:/policies:ro
+    healthcheck:
+      test: ["CMD", "/opa", "version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel/config.yaml"]
+    ports: ["4317:4317", "4318:4318", "8889:8889"]
+    volumes:
+      - ./infra/observability/otel:/etc/otel:ro
+    depends_on: [phoenix]
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports: ["6006:6006", "6007:4317"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:6006')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    ports: ["9090:9090"]
+    volumes:
+      - ./infra/observability/prometheus:/etc/prometheus:ro
+      - promdata:/prometheus
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    ports: ["9091:9091"]
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    ports: ["9093:9093"]
+    volumes:
+      - ./infra/observability/alertmanager:/etc/alertmanager:ro
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin      # local only
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    ports: ["3000:3000"]
+    volumes:
+      - ./infra/observability/grafana:/etc/grafana/provisioning:ro
+      - grafanadata:/var/lib/grafana
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://argus:argus@postgres:5432/argus
+      --artifacts-destination s3://mlflow
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    ports: ["5000:5000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin        # local only
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:
+  miniodata:
+  qdrantdata:
