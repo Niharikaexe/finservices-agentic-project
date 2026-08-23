@@ -177,6 +177,12 @@ class World:
             "budgets": len(self.budgets),
             "expenses": len(self.expenses),
             "fraud_labels": len(self.fraud_labels),
-            "confirmed_fraud": sum(1 for f in self.fraud_labels if f.is_fraud),
+            # Two different numbers, and the gap between them is the whole delayed-
+            # ground-truth story: `fraud_positives` is what is actually true;
+            # `confirmed_by_audit` is what a model is allowed to have learned from.
+            "fraud_positives": sum(1 for f in self.fraud_labels if f.is_fraud),
+            "confirmed_by_audit": sum(
+                1 for f in self.fraud_labels if f.is_fraud and f.confirmed_at is not None
+            ),
             "injections": len(self.injection_labels),
         }

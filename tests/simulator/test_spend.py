@@ -105,7 +105,8 @@ class TestSampleAmount:
 @_SKIP_B
 class TestGenerateBaseline:
     @pytest.fixture(scope="class")
-    def expenses(self) -> list[ExpenseRecord]:
+    @staticmethod
+    def expenses() -> list[ExpenseRecord]:
         return generate_baseline_expenses(
             _USERS, _VENDORS, CONFIG, np.random.default_rng(21), tenant_currency="INR"
         )

@@ -36,23 +36,31 @@ it first means M1 onwards has real data to work against instead of fixtures.
 | 0.6 | `.github/workflows/ci.yml`: ruff, mypy, import-linter, pytest | Claude | ✅ done |
 | 0.7 | ADRs 0001–0004 | Claude | ✅ done |
 | 0.8 | Simulator: entities, config, org tree, vendor catalogue | Claude | ✅ done |
-| **0.9** | **Simulator: baseline spend generation** (`fsa_sim.world.spend`) | **You** | 🟡 **open** |
-| 0.10 | Simulator: fraud typologies (`fsa_sim.adversarial`) | You | ⬜ next |
-| 0.11 | `ml.features.employee_history` + the causality test | You | ⬜ next |
+| 0.9 | Simulator: baseline spend generation (`fsa_sim.world.spend`) | Claude | ✅ done |
+| 0.10 | Simulator: fraud typologies + injection payloads (`fsa_sim.adversarial`) | Claude | ✅ done |
+| **0.11** | **ML training pipeline: features, training, calibration, eval** | **Claude** | 🟡 **open** |
 | 0.12 | Alembic baseline migration + RLS policies | Claude | ⬜ blocked on M1 |
 | 0.13 | `scripts/seed_db.py` — world → Postgres | Claude | ⬜ blocked on M1 |
 
-### Open task 0.9
+### Generated dataset (seed 42)
 
-Implement `sample_amount_minor` and `generate_baseline_expenses` in
-`simulator/src/fsa_sim/world/spend.py`.
+`make simulate` produces, in about 14 seconds:
 
-The contract is `tests/simulator/test_spend.py` — 16 tests, currently skipped, which
-start running as soon as the functions stop raising `NotImplementedError`.
+| | |
+|---|---|
+| tenants / departments / users | 3 / 25 / 1,045 |
+| vendors (incl. 12 ghost vendors) | 586 |
+| expenses | 82,563 |
+| fraud positives | 1,949 (2.4%) |
+| ...of which confirmed by audit | 1,650 — the rest are **never** confirmed |
+| injection payloads planted | 824 |
 
-```bash
-uv run pytest tests/simulator/test_spend.py -v
-```
+The gap between *fraud positives* and *confirmed by audit* is the delayed-ground-truth
+constraint made concrete: 299 genuinely fraudulent claims are never confirmed, and
+`label_as_of` must drop them rather than count them as clean.
 
-Done when: those 16 pass, `make lint` is clean, and `make simulate` writes a world
-with a plausible expense count.
+### Open task 0.11 — the ML training pipeline
+
+Build the fraud model end to end on top of the generated world:
+feature assembly with point-in-time correctness, a LightGBM baseline, calibration,
+PR-AUC / recall@k evaluation, SHAP reasons, and the deliberate-leakage experiment.

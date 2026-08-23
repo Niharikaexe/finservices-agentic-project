@@ -1,15 +1,5 @@
 """Baseline (honest) spend generation.
 
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │  YOUR TASK — Step 1.                                                 │
-    │  Two functions below raise NotImplementedError:                      │
-    │      sample_amount_minor()                                           │
-    │      generate_baseline_expenses()                                    │
-    │  The contract for both is in tests/simulator/test_spend.py, which is  │
-    │  skipped until you implement them and then runs automatically.        │
-    │  Everything else in this file is done — use it.                       │
-    └──────────────────────────────────────────────────────────────────────┘
-
 What "baseline" means here: this module generates **only legitimate spend**. Fraud is
 layered on afterwards by `fsa_sim.adversarial`, which *transforms* baseline claims into
 fraudulent ones. Keeping them separate is not cosmetic:
@@ -40,8 +30,8 @@ from datetime import date, datetime, time, timedelta
 import numpy as np
 
 from fsa_sim.world.config import (
-    CATEGORY_PROFILES,  # noqa: F401  — pre-imported for your implementation below
-    GRADE_MULTIPLIER,  # noqa: F401  — ditto; delete these noqas once you use them
+    CATEGORY_PROFILES,
+    GRADE_MULTIPLIER,
     MONTH_SEASONALITY,
     PERSONA_PROFILES,
     WorldConfig,
@@ -125,32 +115,27 @@ def receipt_phash(vendor_id: str, amount_minor: int, day: date, salt: str = "") 
 def sample_amount_minor(category: Category, grade: int, rng: np.random.Generator) -> int:
     """Sample one claim amount, in minor units.
 
-    Contract (tests/simulator/test_spend.py::TestSampleAmount):
-      * strictly positive `int`
-      * lognormal around `CATEGORY_PROFILES[category].median_minor`, scaled by
-        `GRADE_MULTIPLIER[grade]`, with the category's `sigma`
-      * with probability `profile.round_number_bias`, snap to a "suspiciously round"
-        figure — a multiple of 100 major units — because round numbers are a real
-        fraud signal and the honest world must contain some too, or the feature
-        becomes a perfect giveaway
-      * determinism: same rng state + same inputs => same value
+    Lognormal, because expense amounts are positive, right-skewed and *multiplicative*
+    — a senior person's dinner is roughly 2x a junior's, not "+ ₹500". numpy's
+    `lognormal` is parameterised by the mean and sigma of the **underlying normal**,
+    so for a target median m the underlying mean is `log(m)`: the median of a
+    lognormal is `exp(mu)`, while its mean is the larger `exp(mu + sigma^2/2)`.
 
-    Hints — the syntax you need:
-
-        profile = CATEGORY_PROFILES[category]
-        median  = profile.median_minor * GRADE_MULTIPLIER[grade]
-
-        # numpy's lognormal is parameterised by the mean/sigma of the *underlying
-        # normal*. For a target median m, the underlying mean is log(m) — because
-        # the median of a lognormal is exp(mu).
-        value = rng.lognormal(mean=np.log(median), sigma=profile.sigma)
-
-        if rng.random() < profile.round_number_bias:
-            value = round(value / 10_000) * 10_000     # nearest ₹100 in paise
-
-        return max(1, int(value))
+    The round-number snap deserves a note. Round amounts are a genuine fraud signal
+    (inflated and ghost-vendor claims cluster on them), so the *honest* world has to
+    produce some too. If only fraudulent claims were round, `ci_is_round_100` would be
+    a perfect giveaway and the model would learn the generator instead of the crime.
     """
-    raise NotImplementedError("Step 1a — see the contract above and test_spend.py")
+    profile = CATEGORY_PROFILES[category]
+    median = profile.median_minor * GRADE_MULTIPLIER[grade]
+    value = rng.lognormal(mean=float(np.log(median)), sigma=profile.sigma)
+
+    if rng.random() < profile.round_number_bias:
+        # Nearest ₹100, expressed in paise. Floored at one unit of the rounding grid
+        # so a small claim never collapses to zero.
+        value = max(10_000.0, round(value / 10_000) * 10_000)
+
+    return max(1, int(value))
 
 
 def generate_baseline_expenses(
@@ -161,46 +146,96 @@ def generate_baseline_expenses(
     *,
     tenant_currency: str,
 ) -> list[ExpenseRecord]:
-    """Generate every legitimate claim for one tenant over the world's date range.
+    """Every legitimate claim for one tenant over the world's date range.
 
-    Contract (tests/simulator/test_spend.py::TestGenerateBaseline):
-      * every `expense_id` is unique
-      * `transaction_date` within [config.start_date, config.end_date]
-      * `transaction_date >= user.joined_on` for every claim
-      * `submitted_at.date() >= transaction_date`
-      * `amount_minor > 0` and `currency == tenant_currency` everywhere
-      * the vendor on a claim has the same `category` as the claim
-      * a FREQUENT_TRAVELLER produces materially more claims than a DESK_BOUND peer
-      * weekend claims are a minority of the total
+    Two design decisions, both arguable:
 
-    Suggested shape — a per-user, per-month loop:
+    **1. Poisson per month, then scatter over days — not Poisson per day.**
+    A per-day draw is the obvious choice and it is wrong here for a specific reason:
+    it makes claims independent across days, so the velocity feature family (count and
+    sum in a trailing 1d/7d/30d window) sees pure Poisson noise with no structure to
+    learn. Real expense behaviour is bursty — you travel for three days and file six
+    claims. So we draw a monthly count, pick a *small set of active days*, and land
+    every claim of that month on one of them. Clustering falls out for free, and the
+    velocity features get a real signal that a splitter has to hide inside.
 
-        expenses: list[ExpenseRecord] = []
-        by_category: dict[Category, list[Vendor]] = {}
-        for v in vendors:
-            by_category.setdefault(v.category, []).append(v)
-
-        seq = 0
-        for user in users:
-            rate = PERSONA_PROFILES[user.persona].claims_per_month
-            for month_start in _months(config.start_date, config.end_date):
-                lam = rate * seasonality_multiplier(month_start)
-                n_claims = int(rng.poisson(lam))
-                for _ in range(n_claims):
-                    ...
-                    seq += 1
-                    expenses.append(ExpenseRecord(expense_id=f"exp-{seq:08d}", ...))
-        return expenses
-
-    Two decisions worth thinking about before you write it (there is no single right
-    answer — pick one, and put your reasoning in a code comment):
-      1. Poisson per month with a seasonal rate, or Poisson per day? Per-month is
-         cheaper and gives clean seasonality; per-day gives you burstiness and
-         Monday-morning spikes for free. Which does the fraud model need?
-      2. `seasonality_multiplier` folds in a weekday effect, but a per-month draw has
-         no weekdays. If you go per-month, where does the weekend dip come from?
+    **2. The monthly rate uses `MONTH_SEASONALITY` directly, not
+    `seasonality_multiplier(month_start)`.**
+    That helper folds in a weekday factor, which is meaningless applied to the first
+    of the month — 1 March 2026 is a Sunday, so using it would cut March's *entire*
+    volume by 65% and invert the conference-season effect we are trying to model. The
+    weekday effect belongs at day granularity, where it is applied as the weight when
+    choosing which days are active. Same helper, right altitude.
     """
-    raise NotImplementedError("Step 1b — see the contract above and test_spend.py")
+    by_category: dict[Category, list[Vendor]] = {}
+    for vendor in vendors:
+        by_category.setdefault(vendor.category, []).append(vendor)
+
+    expenses: list[ExpenseRecord] = []
+    seq = 0
+
+    for user in users:
+        rate = PERSONA_PROFILES[user.persona].claims_per_month
+        available = set(PERSONA_PROFILES[user.persona].category_mix) & set(by_category)
+        if not available:
+            continue
+
+        for month_start in months_between(config.start_date, config.end_date):
+            days = [d for d in days_in_month(month_start, config) if d >= user.joined_on]
+            if not days:
+                continue
+
+            n_claims = int(rng.poisson(rate * MONTH_SEASONALITY[month_start.month]))
+            if n_claims == 0:
+                continue
+
+            # Roughly half as many active days as claims => an average of two claims
+            # per active day, with a tail of busier ones. This is the burstiness knob.
+            weights = np.array([seasonality_multiplier(d) for d in days], dtype=float)
+            n_active = max(1, min(len(days), -(-n_claims // 2)))
+            active_idx = rng.choice(
+                len(days), size=n_active, replace=False, p=weights / weights.sum()
+            )
+            active_days = [days[int(i)] for i in active_idx]
+
+            for _ in range(n_claims):
+                txn_date = active_days[int(rng.integers(len(active_days)))]
+
+                category = pick_category(user, rng)
+                if category not in by_category:
+                    continue
+                pool = by_category[category]
+                vendor = pool[int(rng.integers(len(pool)))]
+
+                amount = sample_amount_minor(category, user.grade, rng)
+                profile = CATEGORY_PROFILES[category]
+                attendees = int(rng.integers(1, 7)) if profile.needs_attendees else 1
+
+                submitted_day = txn_date + timedelta(days=submission_lag_days(rng))
+                seq += 1
+                expenses.append(
+                    ExpenseRecord(
+                        expense_id=f"{user.tenant_id}-exp-{seq:08d}",
+                        tenant_id=user.tenant_id,
+                        user_id=user.user_id,
+                        department_id=user.department_id,
+                        category=category,
+                        vendor_id=vendor.vendor_id,
+                        amount_minor=amount,
+                        currency=tenant_currency,
+                        transaction_date=txn_date,
+                        submitted_at=submission_timestamp(submitted_day, rng),
+                        description=f"{category.value.replace('_', ' ')} - {vendor.name}",
+                        receipt_ocr_text=synthesise_receipt_text(
+                            vendor, amount, txn_date, tenant_currency
+                        ),
+                        receipt_phash=receipt_phash(vendor.vendor_id, amount, txn_date),
+                        line_item_count=int(rng.integers(1, 5)),
+                        attendee_count=attendees,
+                    )
+                )
+
+    return expenses
 
 
 # ── A helper you will want for the loop above ───────────────────────────────

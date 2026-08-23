@@ -20,8 +20,17 @@ from datetime import date
 
 import numpy as np
 
+from fsa_sim.adversarial import inject_fraud, inject_payloads
 from fsa_sim.world.config import TenantShape, WorldConfig
-from fsa_sim.world.entities import Budget, Category, ExpenseRecord, Tenant, World
+from fsa_sim.world.entities import (
+    Budget,
+    Category,
+    ExpenseRecord,
+    FraudLabel,
+    InjectionLabel,
+    Tenant,
+    World,
+)
 from fsa_sim.world.org import build_org
 from fsa_sim.world.spend import generate_baseline_expenses
 from fsa_sim.world.vendors import build_vendors
@@ -80,10 +89,27 @@ def generate_tenant(
 
     expenses: list[ExpenseRecord] = []
     budgets: list[Budget] = []
+    fraud_labels: list[FraudLabel] = []
+    injection_labels: list[InjectionLabel] = []
+
     if with_spend:
+        # Order matters and is not arbitrary:
+        #   1. honest spend           — the population
+        #   2. fraud transformation   — mutates a subset of it (ADR 0004)
+        #   3. injection payloads     — independent of fraud, so the two ground truths
+        #                               do not correlate and let one model cheat at the
+        #                               other's job
+        #   4. budgets                — derived from *realised* spend, fraud included,
+        #                               because a finance team budgets against what was
+        #                               actually claimed, not against what was honest
         expenses = generate_baseline_expenses(
             users, vendors, config, rng, tenant_currency=tenant.currency
         )
+        expenses, ghost_vendors, fraud_labels = inject_fraud(
+            expenses, users, config.fraud, rng, world_start=config.start_date
+        )
+        vendors = [*vendors, *ghost_vendors]
+        expenses, injection_labels = inject_payloads(expenses, config.injection_rate, rng)
         budgets = derive_budgets(tenant, expenses)
 
     return World(
@@ -93,6 +119,8 @@ def generate_tenant(
         vendors=vendors,
         budgets=budgets,
         expenses=expenses,
+        fraud_labels=fraud_labels,
+        injection_labels=injection_labels,
     )
 
 
