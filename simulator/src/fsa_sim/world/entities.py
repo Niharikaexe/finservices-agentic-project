@@ -128,19 +128,37 @@ class ExpenseRecord:
 
 @dataclass(frozen=True, slots=True)
 class FraudLabel:
-    """Ground truth, and *when we learned it*.
+    """Ground truth, the business's belief about it, and when that belief was formed.
 
-    `confirmed_at` is the whole point. Fraud is confirmed by an audit days or weeks
-    after submission, so a model trained or evaluated as of time T may only use labels
-    where `confirmed_at <= T`. Every leakage bug in fraud modelling is some version of
-    forgetting this. See ARCHITECTURE.md §11, "delayed ground truth".
+    Three fields, and the distinction between them is the entire delayed-ground-truth
+    design (ARCHITECTURE.md §11):
+
+    `is_fraud`
+        What actually happened. Only the simulator knows this. A model may **never**
+        train on it — it exists so we can measure the model honestly, which is the one
+        thing a real production system cannot do.
+
+    `observed_is_fraud`
+        What the business recorded. Honest claims get reimbursed and recorded clean.
+        Fraud an audit caught is recorded as fraud. Fraud the audit **missed** is also
+        recorded clean — it was reimbursed like anything else. That last case is label
+        noise, it is not a bug, and every real fraud dataset has it.
+
+    `confirmed_at`
+        When that record was written. The asymmetry is the point: a clean verdict
+        arrives in days (it is just reimbursement), a fraud verdict takes weeks of
+        audit. So the recent past always looks cleaner than it was, and a model
+        retrained on it drifts toward under-scoring. This is why §11 insists that
+        retraining must never be triggered by a metric requiring labels you do not yet
+        have, and why prediction-distribution drift is the live proxy signal.
     """
 
     expense_id: str
     is_fraud: bool
     typology: FraudTypology | None
-    confirmed_at: datetime | None  # None => still un-audited at world end
-    linked_expense_ids: tuple[str, ...] = ()  # e.g. the other legs of a split
+    confirmed_at: datetime | None
+    observed_is_fraud: bool = False
+    linked_expense_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,8 +199,9 @@ class World:
             # ground-truth story: `fraud_positives` is what is actually true;
             # `confirmed_by_audit` is what a model is allowed to have learned from.
             "fraud_positives": sum(1 for f in self.fraud_labels if f.is_fraud),
-            "confirmed_by_audit": sum(
-                1 for f in self.fraud_labels if f.is_fraud and f.confirmed_at is not None
+            "caught_by_audit": sum(1 for f in self.fraud_labels if f.observed_is_fraud),
+            "fraud_recorded_clean": sum(
+                1 for f in self.fraud_labels if f.is_fraud and not f.observed_is_fraud
             ),
             "injections": len(self.injection_labels),
         }

@@ -63,13 +63,49 @@ class TestFraudInjection:
         rate = sum(1 for label in labels if label.is_fraud) / len(labels)
         assert 0.01 <= rate <= 0.06
 
-    def test_ground_truth_is_delayed_not_instant(
+    def test_some_fraud_is_never_caught(
+        self, injected: tuple[list[ExpenseRecord], list[FraudLabel]]
+    ) -> None:
+        """Undetected fraud is recorded clean and lands in training data as a negative.
+
+        This is label noise, it is realistic, and a dataset without it produces a
+        model whose offline PR-AUC overstates real performance by the miss rate.
+        """
+        _, labels = injected
+        positives = [label for label in labels if label.is_fraud]
+        caught = [label for label in positives if label.observed_is_fraud]
+        assert 0 < len(caught) < len(positives)
+
+    def test_the_observed_label_is_never_optimistic_about_honest_claims(
+        self, injected: tuple[list[ExpenseRecord], list[FraudLabel]]
+    ) -> None:
+        """No honest claim may be recorded as fraud. False accusations would be a
+        different (and much worse) kind of noise, and we do not model them."""
+        _, labels = injected
+        assert not any(label.observed_is_fraud for label in labels if not label.is_fraud)
+
+    def test_clean_verdicts_arrive_faster_than_fraud_verdicts(
+        self, injected: tuple[list[ExpenseRecord], list[FraudLabel]]
+    ) -> None:
+        """The asymmetry that drives the whole delayed-ground-truth design:
+        reimbursement takes days, an audit takes weeks. So the recent past always looks
+        cleaner than it was."""
+        expenses, labels = injected
+        submitted = {e.expense_id: e.submitted_at for e in expenses}
+
+        def lag(label: FraudLabel) -> float:
+            assert label.confirmed_at is not None
+            return (label.confirmed_at - submitted[label.expense_id]).days
+
+        clean = [lag(label) for label in labels if not label.observed_is_fraud]
+        fraud = [lag(label) for label in labels if label.observed_is_fraud]
+        assert np.median(fraud) > np.median(clean) * 2
+
+    def test_every_claim_eventually_resolves(
         self, injected: tuple[list[ExpenseRecord], list[FraudLabel]]
     ) -> None:
         _, labels = injected
-        positives = [label for label in labels if label.is_fraud]
-        confirmed = [label for label in positives if label.confirmed_at is not None]
-        assert 0 < len(confirmed) < len(positives)  # audit coverage is not 100%
+        assert all(label.confirmed_at is not None for label in labels)
 
     def test_confirmation_always_follows_submission(
         self, injected: tuple[list[ExpenseRecord], list[FraudLabel]]

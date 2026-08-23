@@ -52,23 +52,35 @@ from fsa_sim.world.spend import receipt_phash, submission_timestamp, synthesise_
 _INFLATABLE = (Category.MILEAGE, Category.MEALS, Category.TRAVEL_GROUND, Category.LODGING)
 
 
-def _audit_confirmation(
-    submitted: date, config: FraudConfig, rng: np.random.Generator
-) -> date | None:
-    """When (or whether) an audit confirms this claim as fraud.
+def _resolve_clean(submitted: date, rng: np.random.Generator) -> date:
+    """When a claim is recorded as clean.
 
-    Two thirds of the delayed-ground-truth story lives in this function. Lag is
-    lognormal around ~3 weeks, and `audit_coverage` means a fraction of real fraud is
-    *never* confirmed. Those unconfirmed rows are the reason `label_as_of` must drop
-    them rather than treat them as negatives: they are fraud, and calling them clean
-    teaches the model precisely the wrong lesson.
+    That is simply the reimbursement decision: a few days, not weeks. Every claim gets
+    one — the business has to pay or not pay long before any auditor looks at it.
+    """
+    return submitted + timedelta(days=int(rng.integers(2, 11)))
+
+
+def _resolve_fraud(
+    submitted: date, config: FraudConfig, rng: np.random.Generator
+) -> tuple[date, bool]:
+    """When a fraudulent claim is resolved, and whether the audit actually caught it.
+
+    Returns `(resolution_date, caught)`. A caught claim resolves after a lognormal
+    audit lag around three weeks. A missed one resolves on the ordinary reimbursement
+    timeline and is recorded **clean** — which is how undetected fraud ends up in the
+    training data as a negative.
+
+    That is not a flaw in the simulator. It is the single most important thing about
+    fraud labels in production, and a dataset without it teaches a model that does not
+    survive contact with reality.
     """
     if rng.random() > config.audit_coverage:
-        return None
+        return _resolve_clean(submitted, rng), False
     lag = rng.lognormal(
         mean=float(np.log(config.audit_lag_days_median)), sigma=config.audit_lag_days_sigma
     )
-    return submitted + timedelta(days=int(min(lag, 400)))
+    return submitted + timedelta(days=int(min(lag, 400))), True
 
 
 # ── the typologies ─────────────────────────────────────────────────────
@@ -213,6 +225,17 @@ def _personal(claim: ExpenseRecord, rng: np.random.Generator) -> list[ExpenseRec
     ]
 
 
+def _clean_label(claim: ExpenseRecord, rng: np.random.Generator) -> FraudLabel:
+    """Label for a claim that is, and is recorded as, legitimate."""
+    return FraudLabel(
+        expense_id=claim.expense_id,
+        is_fraud=False,
+        typology=None,
+        confirmed_at=submission_timestamp(_resolve_clean(claim.submitted_at.date(), rng), rng),
+        observed_is_fraud=False,
+    )
+
+
 # ── orchestration ──────────────────────────────────────────────────────
 
 
@@ -306,7 +329,7 @@ def inject_fraud(
         planned = plan.get(index)
         if planned is None:
             kept.append(claim)
-            labels.append(FraudLabel(claim.expense_id, False, None, None))
+            labels.append(_clean_label(claim, rng))
             continue
 
         seq += 10
@@ -314,7 +337,7 @@ def inject_fraud(
 
         if planned is FraudTypology.DUPLICATE:
             kept.append(claim)  # the original submission is legitimate
-            labels.append(FraudLabel(claim.expense_id, False, None, None))
+            labels.append(_clean_label(claim, rng))
             produced, linked = _duplicate(claim, seq, rng)
         elif planned is FraudTypology.SPLIT:
             produced, linked = _split(claim, seq, config, rng)
@@ -340,21 +363,14 @@ def inject_fraud(
 
         for record in produced:
             kept.append(record)
+            resolved, caught = _resolve_fraud(record.submitted_at.date(), config, rng)
             labels.append(
                 FraudLabel(
                     expense_id=record.expense_id,
-                    is_fraud=True,
+                    is_fraud=True,  # what actually happened
                     typology=planned,
-                    confirmed_at=(
-                        None
-                        if (
-                            confirmed := _audit_confirmation(
-                                record.submitted_at.date(), config, rng
-                            )
-                        )
-                        is None
-                        else submission_timestamp(confirmed, rng)
-                    ),
+                    confirmed_at=submission_timestamp(resolved, rng),
+                    observed_is_fraud=caught,  # what the business recorded
                     linked_expense_ids=linked,
                 )
             )
