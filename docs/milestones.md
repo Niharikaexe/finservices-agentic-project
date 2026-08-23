@@ -38,9 +38,11 @@ it first means M1 onwards has real data to work against instead of fixtures.
 | 0.8 | Simulator: entities, config, org tree, vendor catalogue | Claude | ✅ done |
 | 0.9 | Simulator: baseline spend generation (`fsa_sim.world.spend`) | Claude | ✅ done |
 | 0.10 | Simulator: fraud typologies + injection payloads (`fsa_sim.adversarial`) | Claude | ✅ done |
-| **0.11** | **ML training pipeline: features, training, calibration, eval** | **Claude** | 🟡 **open** |
-| 0.12 | Alembic baseline migration + RLS policies | Claude | ⬜ blocked on M1 |
-| 0.13 | `scripts/seed_db.py` — world → Postgres | Claude | ⬜ blocked on M1 |
+| 0.11 | ML feature layer: 6 families, point-in-time correct, causality test | Claude | ✅ done |
+| 0.12 | ML metrics: PR-AUC, recall@k, Brier, ECE, amount baseline | Claude | ✅ done |
+| **0.13** | **Fraud model training** (`fsa_ml.fraud.train.train`) | **You** | 🟡 **open** |
+| 0.14 | Alembic baseline migration + RLS policies | Claude | ⬜ blocked on M1 |
+| 0.15 | `scripts/seed_db.py` — world → Postgres | Claude | ⬜ blocked on M1 |
 
 ### Generated dataset (seed 42)
 
@@ -59,8 +61,27 @@ The gap between *fraud positives* and *confirmed by audit* is the delayed-ground
 constraint made concrete: 299 genuinely fraudulent claims are never confirmed, and
 `label_as_of` must drop them rather than count them as clean.
 
-### Open task 0.11 — the ML training pipeline
+### Training matrix (train-as-of 2026-09-01, eval-as-of 2027-06-01)
 
-Build the fraud model end to end on top of the generated world:
-feature assembly with point-in-time correctness, a LightGBM baseline, calibration,
-PR-AUC / recall@k evaluation, SHAP reasons, and the deliberate-leakage experiment.
+| | rows | positives | rate |
+|---|---|---|---|
+| train | 48,445 | 843 | 1.74% |
+| test  | 32,881 | 719 | 2.19% |
+
+47 features across six families. The split is temporal, never random: the rolling
+features mean a random split leaks future behaviour into the past, and it evaluates
+the model on a period it trained on.
+
+### Open task 0.13 — train the fraud model
+
+Implement `train()` in `ml/src/fsa_ml/fraud/train.py`.
+
+The contract is `tests/ml/test_train.py`, skipped until you implement it. Two of its
+assertions are release gates rather than sanity checks: the model must beat
+`amount_baseline` by 15% PR-AUC, and calibration must improve Brier score.
+
+```bash
+make install-ml
+uv run pytest tests/ml/test_train.py -v
+make train-fraud
+```

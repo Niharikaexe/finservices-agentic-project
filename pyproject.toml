@@ -73,7 +73,10 @@ agent = [
 authz = ["openfga-sdk", "authlib", "python-jose[cryptography]"]
 guards = ["nemoguardrails", "guardrails-ai", "presidio-analyzer", "presidio-anonymizer"]
 ml = [
-  "lightgbm", "scikit-learn", "pandas", "polars", "pyarrow", "numpy",
+  # numba is a transitive dependency of shap. Without a floor, uv backtracks to
+  # numba 0.47, which builds against the long-removed `numpy.distutils` and fails.
+  # Pinning the floor is cheaper than debugging a resolver backtrack every sync.
+  "lightgbm", "scikit-learn", "pandas", "polars", "pyarrow", "numpy", "numba>=0.60",
   "onnx", "onnxruntime", "skl2onnx", "shap", "optuna",
   "mlflow", "evidently>=0.4", "statsforecast",
 ]
@@ -112,7 +115,10 @@ explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 # Third-party libs without stubs. Keep this list short and justified.
-module = ["prometheus_client.*", "lightgbm.*", "shap.*", "mlflow.*", "evidently.*"]
+module = [
+  "prometheus_client.*", "lightgbm.*", "shap.*", "mlflow.*", "evidently.*",
+  "sklearn.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

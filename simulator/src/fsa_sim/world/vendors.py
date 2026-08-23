@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import numpy as np
+import numpy.typing as npt
 
 from fsa_sim.world.entities import Category, Tenant, Vendor
 
@@ -77,7 +78,9 @@ def build_vendors(
     return vendors
 
 
-def popularity_weights(n: int, rng: np.random.Generator, *, alpha: float = 1.6) -> np.ndarray:
+def popularity_weights(
+    n: int, rng: np.random.Generator, *, alpha: float = 1.6
+) -> npt.NDArray[np.float64]:
     """Zipf-ish weights over `n` vendors: a few dominate, a long tail barely appears.
 
     Returns a probability vector, shuffled so the popular vendors are not the first
@@ -87,4 +90,5 @@ def popularity_weights(n: int, rng: np.random.Generator, *, alpha: float = 1.6) 
     ranks = np.arange(1, n + 1, dtype=float)
     weights = 1.0 / ranks**alpha
     rng.shuffle(weights)
-    return weights / weights.sum()
+    normalised: npt.NDArray[np.float64] = weights / weights.sum()
+    return normalised

@@ -21,12 +21,16 @@ exercised against a synthetic-world simulator rather than live customers.
 uv sync                 # one venv, every workspace member editable
 make test               # unit tests
 make lint               # ruff + mypy --strict + import-linter
-make simulate-org       # generate tenants, org trees and vendors
+make simulate           # generate the synthetic world (~15s, 82k claims)
+make features           # assemble the 47-feature training matrix
+make install-ml         # add lightgbm, shap, optuna, mlflow
+make train-fraud        # train + evaluate the fraud model
 make up                 # full local stack (see ARCHITECTURE.md §7)
 ```
 
-`make simulate` (spend included) fails until `fsa_sim.world.spend` is implemented —
-that is the current open task.
+`make train-fraud` fails until `fsa_ml.fraud.train.train` is implemented — that is the
+current open task. See [docs/notebooks.md](./docs/notebooks.md) for the notebook/Colab
+policy.
 
 ## Repository map
 
@@ -43,5 +47,7 @@ docs/adr/     one ADR per real decision
 
 ## Status
 
-**M0 — Foundation: in progress.** Workspace, tooling, CI, local stack and the
-simulator's org/vendor generators are in. Spend generation is the open task.
+**M0 — Foundation: in progress.** Workspace, tooling, CI and local stack are in. The
+simulator generates a full labelled world (82,563 claims, 1,949 fraud positives across
+six typologies, 824 planted injection payloads), and the ML feature layer assembles 47
+point-in-time-correct features from it. Fraud model training is the open task.
