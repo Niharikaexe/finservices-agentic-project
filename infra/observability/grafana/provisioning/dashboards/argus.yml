@@ -1,0 +1,12 @@
+# Dashboards as code (ARCHITECTURE.md §13). Provisioned from the repo, never edited
+# in the UI — a dashboard someone hand-edited at 3am is a dashboard nobody can restore.
+apiVersion: 1
+providers:
+  - name: argus
+    orgId: 1
+    folder: Argus
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

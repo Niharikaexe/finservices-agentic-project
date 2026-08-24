@@ -77,6 +77,15 @@ train-fraud:  ## Train + evaluate the fraud model (needs `make install-ml`)
 	$(UV) run --group ml python -m fsa_ml.cli train-fraud --world data/worlds/seed-$${SEED:-42} \
 	  --train-as-of 2026-09-01 --eval-as-of 2027-06-01
 
+.PHONY: acl
+acl:  ## Run the ACL isolation suite (ARCHITECTURE.md §10)
+	$(UV) run pytest tests/authz/ -v
+
+.PHONY: measure
+measure:  ## Produce every headline number: ACL, latency, guardrail catch rates
+	$(UV) run python scripts/measure_platform.py
+	$(UV) run python scripts/measure_guardrails.py
+
 .PHONY: seed
 seed:  ## Load the generated world into Postgres      (M1)
 	@echo "not yet — scripts/seed_db.py lands with the expense-api in M1"

@@ -33,3 +33,6 @@ mlruns/
 .idea/
 .vscode/
 .DS_Store
+
+# Measured outputs — regenerate with `make measure`, do not commit
+data/metrics/

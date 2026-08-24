@@ -1,0 +1,60 @@
+{
+  "title": "Argus — Trust & Safety",
+  "uid": "argus-trust-safety",
+  "tags": ["argus", "security"],
+  "timezone": "browser",
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "type": "timeseries", "title": "Guardrail trips by rail",
+      "description": "A rail that stops tripping is as alarming as one that always trips — see the GuardrailBypassSuspected alert.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum by (rail) (rate(guardrail_trips_total{action!=\"allow\"}[5m]))", "legendFormat": "{{rail}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Per-rail latency cost (p95)",
+      "description": "What each rail costs in the critical path. This is the number that decides sidecar vs inline.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (rail, le) (rate(guardrail_duration_seconds_bucket[5m])))", "legendFormat": "{{rail}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Authorisation decisions by outcome",
+      "description": "A deny spike is either an attack or a broken tuple write. Both need looking at.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "sum by (decision) (rate(authz_decisions_total[5m]))", "legendFormat": "{{decision}}" }]
+    },
+    {
+      "type": "stat", "title": "Cross-tenant denials (1h)",
+      "description": "Must be zero in normal operation. Any non-zero value is either a probe or a bug.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 8 },
+      "targets": [{ "expr": "sum(increase(authz_decisions_total{decision=\"deny\",resource_type=\"policy_document\"}[1h]))" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "red", "value": 1 }] } } }
+    },
+    {
+      "type": "stat", "title": "Fail-closed events (1h)",
+      "description": "The trust plane was unavailable and we denied. Non-zero means an outage, not an attack.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 8 },
+      "targets": [{ "expr": "sum(increase(authz_decisions_total{decision=\"fail_closed\"}[1h]))" }],
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [
+        { "color": "green", "value": null }, { "color": "orange", "value": 1 }] } } }
+    },
+    {
+      "type": "timeseries", "title": "Injection rail trips by action",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 12 },
+      "targets": [{ "expr": "sum by (action) (rate(guardrail_trips_total{rail=\"injection\"}[5m]))", "legendFormat": "{{action}}" }]
+    },
+    {
+      "type": "timeseries", "title": "LLM cost per workflow (USD/hr)",
+      "description": "Unit economics per business transaction is the metric a CTO actually asks for.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [{ "expr": "sum by (workflow) (rate(llm_cost_usd_total[1h])) * 3600", "legendFormat": "{{workflow}}" }]
+    },
+    {
+      "type": "timeseries", "title": "Retrieval + model latency (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (workflow, le) (rate(llm_request_duration_seconds_bucket[5m])))", "legendFormat": "{{workflow}}" }]
+    }
+  ]
+}
