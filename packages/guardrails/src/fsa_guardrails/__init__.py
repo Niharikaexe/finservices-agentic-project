@@ -6,6 +6,7 @@ simulator starts producing attacker-controlled receipt text in the very first
 milestone of work.
 """
 
+from fsa_guardrails.rails import scan_injection, scan_pii, scan_tenant_leakage
 from fsa_guardrails.untrusted import (
     GuardrailBlockedError,
     RailAction,
@@ -13,4 +14,12 @@ from fsa_guardrails.untrusted import (
     UntrustedText,
 )
 
-__all__ = ["GuardrailBlockedError", "RailAction", "RailVerdict", "UntrustedText"]
+__all__ = [
+    "GuardrailBlockedError",
+    "RailAction",
+    "RailVerdict",
+    "UntrustedText",
+    "scan_injection",
+    "scan_pii",
+    "scan_tenant_leakage",
+]

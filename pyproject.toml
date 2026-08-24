@@ -9,6 +9,8 @@ dependencies = [
   "fsa-common",
   "fsa-authz",
   "fsa-guardrails",
+  "fsa-retrieval",
+  "fsa-gateway",
   "fsa-telemetry",
   "fsa-ml",
   "fsa-sim",
@@ -35,6 +37,8 @@ members = ["packages/*", "ml", "simulator", "evals"]
 fsa-common     = { workspace = true }
 fsa-authz      = { workspace = true }
 fsa-guardrails = { workspace = true }
+fsa-retrieval  = { workspace = true }
+fsa-gateway    = { workspace = true }
 fsa-telemetry  = { workspace = true }
 fsa-ml         = { workspace = true }
 fsa-sim        = { workspace = true }
@@ -105,12 +109,17 @@ ignore = ["A003"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG"]
+# `object` and `type` shadow builtins, and that is deliberate: they mirror the
+# OpenFGA SDK's own parameter names, so a reader can map our calls onto their docs.
+"packages/authz/src/fsa_authz/store.py" = ["A002"]
+"packages/authz/src/fsa_authz/local.py" = ["A002"]
+"packages/authz/src/fsa_authz/openfga.py" = ["A002"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 warn_unreachable = true
-mypy_path = "packages/common/src:packages/authz/src:packages/guardrails/src:packages/telemetry/src:ml/src:simulator/src:evals/src"
+mypy_path = "packages/common/src:packages/authz/src:packages/guardrails/src:packages/retrieval/src:packages/gateway/src:packages/telemetry/src:ml/src:simulator/src:evals/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]

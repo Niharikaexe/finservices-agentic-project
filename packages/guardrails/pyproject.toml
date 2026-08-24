@@ -3,7 +3,7 @@ name = "fsa-guardrails"
 version = "0.0.0"
 description = "Argus guardrails: UntrustedText, rails, PII redaction"
 requires-python = ">=3.12"
-dependencies = ["fsa-common"]
+dependencies = ["fsa-common", "fsa-telemetry"]
 
 [build-system]
 requires = ["hatchling"]
@@ -14,3 +14,4 @@ packages = ["src/fsa_guardrails"]
 
 [tool.uv.sources]
 fsa-common = { workspace = true }
+fsa-telemetry = { workspace = true }

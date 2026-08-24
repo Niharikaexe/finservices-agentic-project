@@ -22,8 +22,10 @@ members = [
     "fsa-authz",
     "fsa-common",
     "fsa-evals",
+    "fsa-gateway",
     "fsa-guardrails",
     "fsa-ml",
+    "fsa-retrieval",
     "fsa-sim",
     "fsa-telemetry",
 ]
@@ -303,8 +305,10 @@ dependencies = [
     { name = "fsa-authz" },
     { name = "fsa-common" },
     { name = "fsa-evals" },
+    { name = "fsa-gateway" },
     { name = "fsa-guardrails" },
     { name = "fsa-ml" },
+    { name = "fsa-retrieval" },
     { name = "fsa-sim" },
     { name = "fsa-telemetry" },
 ]
@@ -414,8 +418,10 @@ requires-dist = [
     { name = "fsa-authz", editable = "packages/authz" },
     { name = "fsa-common", editable = "packages/common" },
     { name = "fsa-evals", editable = "evals" },
+    { name = "fsa-gateway", editable = "packages/gateway" },
     { name = "fsa-guardrails", editable = "packages/guardrails" },
     { name = "fsa-ml", editable = "ml" },
+    { name = "fsa-retrieval", editable = "packages/retrieval" },
     { name = "fsa-sim", editable = "simulator" },
     { name = "fsa-telemetry", editable = "packages/telemetry" },
 ]
@@ -2438,15 +2444,38 @@ dependencies = [
 requires-dist = [{ name = "fsa-common", editable = "packages/common" }]
 
 [[package]]
+name = "fsa-gateway"
+version = "0.0.0"
+source = { editable = "packages/gateway" }
+dependencies = [
+    { name = "fsa-common" },
+    { name = "fsa-guardrails" },
+    { name = "fsa-telemetry" },
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fsa-common", editable = "packages/common" },
+    { name = "fsa-guardrails", editable = "packages/guardrails" },
+    { name = "fsa-telemetry", editable = "packages/telemetry" },
+    { name = "httpx", specifier = ">=0.27" },
+]
+
+[[package]]
 name = "fsa-guardrails"
 version = "0.0.0"
 source = { editable = "packages/guardrails" }
 dependencies = [
     { name = "fsa-common" },
+    { name = "fsa-telemetry" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "fsa-common", editable = "packages/common" }]
+requires-dist = [
+    { name = "fsa-common", editable = "packages/common" },
+    { name = "fsa-telemetry", editable = "packages/telemetry" },
+]
 
 [[package]]
 name = "fsa-ml"
@@ -2466,6 +2495,25 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pyarrow", specifier = ">=16" },
+    { name = "scikit-learn", specifier = ">=1.5" },
+]
+
+[[package]]
+name = "fsa-retrieval"
+version = "0.0.0"
+source = { editable = "packages/retrieval" }
+dependencies = [
+    { name = "fsa-authz" },
+    { name = "fsa-common" },
+    { name = "numpy" },
+    { name = "scikit-learn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fsa-authz", editable = "packages/authz" },
+    { name = "fsa-common", editable = "packages/common" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "scikit-learn", specifier = ">=1.5" },
 ]
 

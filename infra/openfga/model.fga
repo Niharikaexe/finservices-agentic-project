@@ -1,0 +1,58 @@
+# Argus authorisation model (ARCHITECTURE.md §2).
+#
+# Two things here are load-bearing and worth defending in review:
+#
+#   `define viewer: member or manager_chain`
+#       Manager visibility follows the actual reporting tree rather than a hardcoded
+#       role string, so a manager two levels up sees a department without anyone
+#       writing a tuple for it. Add a sub-department and visibility is correct by
+#       construction. Crucially it is the manager chain that recurses, not the viewer
+#       set — see ADR 0006 for the bug that distinction prevents.
+#
+#   `define can_approve: approver but not owner`
+#       Self-approval prevention lives in the authorisation model, not in an
+#       application `if`. An `if` can be forgotten on a new endpoint; this cannot.
+
+model
+  schema 1.1
+
+type user
+
+type tenant
+  relations
+    define employee: [user]
+    define auditor: [user]
+    define finance: [user]
+    define admin: [user]
+
+type department
+  relations
+    define tenant: [tenant]
+    define parent: [department]
+    define member: [user]
+    define manager: [user]
+    # `manager_chain` is recursive over MANAGERS ONLY. Using `viewer from parent`
+    # here instead would let an ordinary member of a parent department read a child
+    # department's addendum — which is over-permissioning that looks correct until
+    # you probe it. See ADR 0006.
+    define manager_chain: manager or manager_chain from parent
+    define viewer: member or manager_chain
+
+type expense
+  relations
+    define tenant: [tenant]
+    define owner: [user]
+    define department: [department]
+    define approver: manager from department
+    define viewer: owner or approver or auditor from tenant or finance from tenant
+    define can_approve: approver but not owner
+
+type policy_document
+  relations
+    define tenant: [tenant]
+    define scope: [department]
+    define tenant_scope: [tenant]
+    # A department addendum is readable by that department's viewers (which, via
+    # `viewer from parent`, includes managers above it). A tenant-wide policy is
+    # readable by every employee of that tenant. Auditors and finance read both.
+    define reader: viewer from scope or employee from tenant_scope or auditor from tenant or finance from tenant

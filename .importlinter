@@ -7,10 +7,14 @@ root_packages =
     fsa_common
     fsa_authz
     fsa_guardrails
+    fsa_retrieval
+    fsa_gateway
     fsa_telemetry
     fsa_ml
     fsa_sim
     fsa_evals
+    fsa_retrieval
+    fsa_gateway
 
 [importlinter:contract:layers]
 name = Shared packages sit below ml and simulator
@@ -18,7 +22,9 @@ type = layers
 layers =
     fsa_evals
     fsa_ml : fsa_sim
-    fsa_authz : fsa_guardrails : fsa_telemetry
+    fsa_retrieval
+    fsa_authz : fsa_guardrails : fsa_gateway
+    fsa_telemetry
     fsa_common
 
 [importlinter:contract:kernel-is-independent]
@@ -28,7 +34,10 @@ source_modules = fsa_common
 forbidden_modules =
     fsa_authz
     fsa_guardrails
+    fsa_retrieval
     fsa_telemetry
     fsa_ml
     fsa_sim
     fsa_evals
+    fsa_retrieval
+    fsa_gateway
