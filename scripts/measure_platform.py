@@ -15,9 +15,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from build_authz_world import build  # noqa: E402
-from fsa_authz import RelationTuple  # noqa: E402
-from fsa_common import FailClosedError  # noqa: E402
+from build_authz_world import build
+
+from fsa_authz import RelationTuple
+from fsa_common import FailClosedError
 
 MARCH, AUGUST = date(2026, 3, 15), date(2026, 8, 15)
 

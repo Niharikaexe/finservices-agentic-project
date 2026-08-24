@@ -22,9 +22,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
-from build_authz_world import build  # noqa: E402
-from fsa_authz import RelationTuple  # noqa: E402
-from fsa_common import FailClosedError  # noqa: E402
+from build_authz_world import build
+
+from fsa_authz import RelationTuple
+from fsa_common import FailClosedError
 
 MARCH = date(2026, 3, 15)
 AUGUST = date(2026, 8, 15)
@@ -324,7 +325,7 @@ def test_no_superseded_chunk_is_ever_returned(world) -> None:  # type: ignore[no
 
 
 def test_zero_unauthorised_chunks_across_the_full_probe_matrix(world) -> None:  # type: ignore[no-untyped-def]
-    """The number to quote. Every user × every probe, checked against the store's own
+    """The number to quote. Every user x every probe, checked against the store's own
     verdict on the document each returned chunk came from."""
     checked = 0
     violations = []
