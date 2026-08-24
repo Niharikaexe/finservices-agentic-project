@@ -9,7 +9,8 @@ two temporal versions. Nothing is mocked except the clock.
 
 The suite runs in-process against `LocalAuthorizationStore` so it is part of the
 ordinary unit test run rather than something that only works when docker is healthy.
-`test_parity.py` is what makes that stand-in trustworthy.
+The parity suite that would prove the local store matches a real OpenFGA server is
+**not yet written** — see `fsa_authz.store` for what is known to diverge.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from build_authz_world import build
 
-from fsa_authz import RelationTuple
+from fsa_authz import RelationTuple, expense_tuples
 from fsa_common import FailClosedError
 
 MARCH = date(2026, 3, 15)
@@ -53,6 +54,48 @@ def world():  # type: ignore[no-untyped-def]
     return build()
 
 
+def readable_by_oracle(world, user) -> set[str]:  # type: ignore[no-untyped-def]
+    """Which documents this user may read, computed from the org tree directly.
+
+    This deliberately does NOT consult the authorisation store. The headline test used
+    to retrieve through `list_objects` and then validate each hit with `check` — but
+    `list_objects` is *implemented by calling* `check`, so the oracle and the system
+    under test were the same function. Making `check` return True unconditionally (a
+    total ACL bypass) left that test passing.
+
+    The rules below are read off `infra/openfga/model.fga` by hand, which is the point:
+    an independent restatement is what makes disagreement detectable.
+    """
+    by_id = {d.department_id: d for d in world.departments}
+
+    def is_ancestor_or_self(candidate: str, department_id: str) -> bool:
+        cursor: str | None = department_id
+        seen: set[str] = set()
+        while cursor and cursor not in seen:
+            if cursor == candidate:
+                return True
+            seen.add(cursor)
+            cursor = by_id[cursor].parent_id
+        return False
+
+    readable: set[str] = set()
+    for document in world.documents:
+        if document.tenant_id != user.tenant_id:
+            continue  # tenant boundary, always
+        if document.scope_department_id is None:
+            readable.add(document.document_id)  # tenant-wide: every employee
+            continue
+        if user.role in {"auditor", "finance"}:
+            readable.add(document.document_id)  # read-everything, in-tenant
+        elif (user.role == "employee" and document.scope_department_id == user.department_id) or (
+            user.role == "manager"
+            and is_ancestor_or_self(user.department_id, document.scope_department_id)
+        ):
+            readable.add(document.document_id)
+        # admin: tenant-wide documents only, already handled above
+    return readable
+
+
 def _employees(world, tenant_id: str, limit: int = 40):  # type: ignore[no-untyped-def]
     return [u for u in world.users_of(tenant_id) if u.role == "employee"][:limit]
 
@@ -68,14 +111,19 @@ def test_no_cross_tenant_retrieval_under_any_query(world) -> None:  # type: igno
     the one bug that ends the conversation.
     """
     violations = []
+    returned = 0
     for tenant in world.tenants:
         for user in _employees(world, tenant.tenant_id, limit=25):
             principal = world.principal(user.user_id)
             for query in PROBE_QUERIES:
                 result = world.retriever.retrieve(query, principal, as_of=MARCH, k=10)
+                returned += len(result.chunks)
                 for hit in result.chunks:
                     if hit.chunk.tenant_id != tenant.tenant_id:
                         violations.append((user.user_id, query, hit.citation))
+    # Non-vacuity floor. Without this, a retriever that returns nothing at all would
+    # satisfy `violations == []` and this test would pass while proving nothing.
+    assert returned > 500, f"only {returned} chunks returned — test is passing vacuously"
     assert violations == [], f"{len(violations)} cross-tenant chunks leaked"
 
 
@@ -201,13 +249,13 @@ def test_self_approval_is_denied_by_the_model_not_by_code(world) -> None:  # typ
     """
     tenant = world.tenants[1]
     manager = next(u for u in world.users_of(tenant.tenant_id) if u.role == "manager")
-    from fsa_authz import expense_tuples
 
+    # Written through the PUBLIC api. An earlier version of this test assigned to
+    # `world.authz._dept_of_expense` directly, because `grant()` silently no-opped on
+    # structural relations — so the test was working around a broken public path and
+    # therefore not testing the path production uses.
     for t in expense_tuples("exp-self", tenant.tenant_id, manager.user_id, manager.department_id):
-        world.authz.grant(t) if t.relation not in {"tenant", "department"} else None
-    # the tenant/department edges need the structural maps, so rebuild via the store
-    world.authz._dept_of_expense["expense:exp-self"] = f"department:{manager.department_id}"
-    world.authz._tenant_of["expense:exp-self"] = f"tenant:{tenant.tenant_id}"
+        world.authz.grant(t)
 
     user = f"user:{manager.user_id}"
     assert world.authz.check(user=user, relation="approver", object="expense:exp-self")
@@ -223,9 +271,8 @@ def test_manager_can_approve_a_reports_claim(world) -> None:  # type: ignore[no-
         for u in world.users_of(tenant.tenant_id)
         if u.role == "employee" and u.department_id == manager.department_id
     )
-    world.authz.grant(RelationTuple(f"user:{report.user_id}", "owner", "expense:exp-report"))
-    world.authz._dept_of_expense["expense:exp-report"] = f"department:{manager.department_id}"
-    world.authz._tenant_of["expense:exp-report"] = f"tenant:{tenant.tenant_id}"
+    for t in expense_tuples("exp-report", tenant.tenant_id, report.user_id, manager.department_id):
+        world.authz.grant(t)
 
     assert world.authz.check(
         user=f"user:{manager.user_id}", relation="can_approve", object="expense:exp-report"
@@ -240,6 +287,43 @@ def test_manager_can_approve_a_reports_claim(world) -> None:  # type: ignore[no-
         relation="can_approve",
         object="expense:exp-report",
     ), "a manager of another department must not approve this claim"
+
+
+def test_owner_sees_their_own_expense_and_a_peer_does_not(world) -> None:  # type: ignore[no-untyped-def]
+    """`expense.viewer` had no coverage at all — §10 asks for "a manager sees direct
+    reports' expenses but not their peer's reports'", and only `can_approve` was
+    tested. This covers the read side."""
+    tenant = world.tenants[1]
+    manager = next(u for u in world.users_of(tenant.tenant_id) if u.role == "manager")
+    report = next(
+        u
+        for u in world.users_of(tenant.tenant_id)
+        if u.role == "employee" and u.department_id == manager.department_id
+    )
+    peer = next(
+        u
+        for u in world.users_of(tenant.tenant_id)
+        if u.role == "employee" and u.department_id != manager.department_id
+    )
+    for t in expense_tuples("exp-view", tenant.tenant_id, report.user_id, manager.department_id):
+        world.authz.grant(t)
+
+    def viewer(user_id: str) -> bool:
+        return world.authz.check(
+            user=f"user:{user_id}", relation="viewer", object="expense:exp-view"
+        )
+
+    assert viewer(report.user_id), "owner must see their own claim"
+    assert viewer(manager.user_id), "the approving manager must see it"
+    assert not viewer(peer.user_id), "a peer in another department must not"
+
+    auditor = next(u for u in world.users_of(tenant.tenant_id) if u.role == "auditor")
+    admin = next(u for u in world.users_of(tenant.tenant_id) if u.role == "admin")
+    assert viewer(auditor.user_id), "the auditor reads everything in the tenant"
+    assert not viewer(admin.user_id), "the admin reads no expense data"
+
+    foreign = next(u for u in world.users_of(world.tenants[0].tenant_id) if u.role == "auditor")
+    assert not viewer(foreign.user_id), "another tenant's auditor must see nothing"
 
 
 # ── revocation and fail-closed ──────────────────────────────────────────────
@@ -265,18 +349,22 @@ def test_revocation_takes_effect_on_the_next_query(world) -> None:  # type: igno
     )
     principal = world.principal(user.user_id)
 
+    membership = RelationTuple(
+        f"user:{user.user_id}", "member", f"department:{sales.department_id}"
+    )
     before = world.retriever.retrieve("client entertainment limit", principal, as_of=MARCH, k=10)
     assert any("-add-" in c.chunk.document_id for c in before.chunks)
 
-    world.authz.revoke(
-        RelationTuple(f"user:{user.user_id}", "member", f"department:{sales.department_id}")
-    )
-    after = world.retriever.retrieve("client entertainment limit", principal, as_of=MARCH, k=10)
-    assert not any("-add-" in c.chunk.document_id for c in after.chunks)
-
-    world.authz.grant(
-        RelationTuple(f"user:{user.user_id}", "member", f"department:{sales.department_id}")
-    )
+    # try/finally, because the fixture is module-scoped: an assertion failure here
+    # used to leave this user revoked for every later test in the file, which would
+    # make those tests return fewer results and (before the non-vacuity floors) still
+    # pass. A test that can corrupt its neighbours is a test you cannot trust.
+    try:
+        world.authz.revoke(membership)
+        after = world.retriever.retrieve("client entertainment limit", principal, as_of=MARCH, k=10)
+        assert not any("-add-" in c.chunk.document_id for c in after.chunks)
+    finally:
+        world.authz.grant(membership)
 
 
 def test_retrieval_fails_closed_when_authz_is_unavailable(world) -> None:  # type: ignore[no-untyped-def]
@@ -308,6 +396,10 @@ def test_a_march_claim_is_judged_against_march_policy(world) -> None:  # type: i
 
     march_docs = {c.chunk.document_id for c in march.chunks}
     august_docs = {c.chunk.document_id for c in august.chunks}
+    # Positive assertions first: each window must actually see its own version, or the
+    # negatives below are satisfied by an empty result set.
+    assert any("global-v1" in d for d in march_docs), "March saw no v1 policy at all"
+    assert any("global-v2" in d for d in august_docs), "August saw no v2 policy at all"
     assert not any("global-v2" in d for d in march_docs), "March saw a policy from July"
     assert not any("global-v1" in d for d in august_docs), "August saw a superseded policy"
 
@@ -318,6 +410,7 @@ def test_no_superseded_chunk_is_ever_returned(world) -> None:  # type: ignore[no
             principal = world.principal(user.user_id)
             for as_of in (MARCH, AUGUST):
                 result = world.retriever.retrieve("limits", principal, as_of=as_of, k=10)
+                assert result.chunks, "no chunks returned — assertion would be vacuous"
                 assert all(c.chunk.is_live(as_of) for c in result.chunks)
 
 
@@ -325,22 +418,82 @@ def test_no_superseded_chunk_is_ever_returned(world) -> None:  # type: ignore[no
 
 
 def test_zero_unauthorised_chunks_across_the_full_probe_matrix(world) -> None:  # type: ignore[no-untyped-def]
-    """The number to quote. Every user x every probe, checked against the store's own
-    verdict on the document each returned chunk came from."""
+    """The number to quote — validated against an INDEPENDENT oracle.
+
+    Every returned chunk is checked against `readable_by_oracle`, which computes the
+    permitted set from the org tree rather than from the store. That is what makes this
+    test capable of failing: validating with `authz.check` would be asking the store to
+    mark its own homework, and a store that returned True for everything would pass.
+    """
     checked = 0
     violations = []
     for tenant in world.tenants:
         for user in _employees(world, tenant.tenant_id, limit=30):
             principal = world.principal(user.user_id)
+            permitted = readable_by_oracle(world, user)
             for query in PROBE_QUERIES:
                 result = world.retriever.retrieve(query, principal, as_of=MARCH, k=8)
                 for hit in result.chunks:
                     checked += 1
-                    if not world.authz.check(
-                        user=principal.fga_user,
-                        relation="reader",
-                        object=f"policy_document:{hit.chunk.document_id}",
-                    ):
-                        violations.append((user.user_id, query, hit.citation))
+                    if hit.chunk.document_id not in permitted:
+                        violations.append((user.user_id, user.role, query, hit.citation))
     assert checked > 1000, f"only {checked} chunks checked — probe matrix too small"
     assert violations == [], f"{len(violations)} unauthorised chunks of {checked}"
+
+
+def test_the_store_agrees_with_the_oracle_for_every_user(world) -> None:  # type: ignore[no-untyped-def]
+    """Brute-force the whole population against the independent oracle.
+
+    Not just the chunks that happened to be retrieved — every user, every document.
+    This catches an over-grant that no probe query happens to surface, and an
+    under-grant that would silently break the product.
+    """
+    over, under = [], []
+    for user in world.users:
+        principal = world.principal(user.user_id)
+        actual = set(
+            world.authz.list_objects(
+                user=principal.fga_user, relation="reader", type="policy_document"
+            )
+        )
+        expected = readable_by_oracle(world, user)
+        over.extend((user.user_id, user.role, d) for d in actual - expected)
+        under.extend((user.user_id, user.role, d) for d in expected - actual)
+    assert over == [], f"{len(over)} over-grants, e.g. {over[:3]}"
+    assert under == [], f"{len(under)} under-grants, e.g. {under[:3]}"
+
+
+def test_tenant_predicate_is_load_bearing(world) -> None:  # type: ignore[no-untyped-def]
+    """The tenant filter must do work that the ACL filter does not.
+
+    Deleting `chunk.tenant_id == tenant_id` from `InMemoryVectorStore.search` left the
+    entire suite green, because generated document ids are tenant-prefixed so the ACL
+    list already excluded foreign documents. The control with the least coverage was
+    the last line of defence.
+
+    This constructs the case the generated world never produces: a chunk whose
+    `document_id` IS in the caller's allow-list but whose `tenant_id` is foreign —
+    which is exactly what a mis-provisioned tuple or a bad ingestion job would create.
+    """
+    import numpy as np
+
+    from fsa_retrieval import Chunk, InMemoryVectorStore
+
+    permitted_id = "doc-permitted"
+    store = InMemoryVectorStore()
+    chunks = [
+        Chunk("c-own", permitted_id, "t01", None, "R-1", "meals limit", date(2026, 1, 1), None),
+        # same document id, different tenant. Only the tenant predicate stops this.
+        Chunk("c-foreign", permitted_id, "t02", None, "R-1", "meals limit", date(2026, 1, 1), None),
+    ]
+    store.index(chunks, np.array([[1.0, 0.0], [1.0, 0.0]]))
+
+    hits = store.search(
+        query_vector=np.array([1.0, 0.0]),
+        tenant_id="t01",
+        allowed_document_ids=[permitted_id],
+        as_of=MARCH,
+        k=10,
+    )
+    returned = {c.chunk_id for c, _ in hits}
+    assert returned == {"c-own"}, f"tenant predicate did not filter: {returned}"

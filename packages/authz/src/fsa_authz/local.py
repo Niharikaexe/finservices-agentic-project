@@ -14,7 +14,9 @@ parity test will tell you if you got it wrong.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from types import MappingProxyType
+from typing import ClassVar
 
 from fsa_authz.tuples import RelationTuple
 from fsa_common import FailClosedError
@@ -43,24 +45,23 @@ class LocalAuthorizationStore:
 
     def __init__(self, tuples: Iterable[RelationTuple], *, available: bool = True) -> None:
         self._available = available
+        # Every one of these is a SET, matching OpenFGA. They were single-valued
+        # dicts, so a second `scope` tuple silently discarded the first — a document
+        # co-scoped to two departments (an entirely reasonable thing to want) behaved
+        # differently here than in production, and which department won depended on
+        # tuple insertion order.
         self._direct: dict[tuple[str, str], set[str]] = defaultdict(set)
-        self._parent: dict[str, str] = {}
-        self._dept_of_expense: dict[str, str] = {}
-        self._tenant_of: dict[str, str] = {}
-        self._scope_of_doc: dict[str, str] = {}
-        self._tenant_scope_of_doc: dict[str, str] = {}
+        self._parent: dict[str, set[str]] = defaultdict(set)
+        self._dept_of_expense: dict[str, set[str]] = defaultdict(set)
+        self._tenant_of: dict[str, set[str]] = defaultdict(set)
+        self._scope_of_doc: dict[str, set[str]] = defaultdict(set)
+        self._tenant_scope_of_doc: dict[str, set[str]] = defaultdict(set)
 
         for t in tuples:
-            if t.relation == "parent":
-                self._parent[t.object] = t.user
-            elif t.relation == "department":
-                self._dept_of_expense[t.object] = t.user
-            elif t.relation == "tenant":
-                self._tenant_of[t.object] = t.user
-            elif t.relation == "scope":
-                self._scope_of_doc[t.object] = t.user
-            elif t.relation == "tenant_scope":
-                self._tenant_scope_of_doc[t.object] = t.user
+            structural = self._STRUCTURAL.get(t.relation)
+            if structural is not None:
+                mapping: dict[str, set[str]] = getattr(self, structural)
+                mapping[t.object].add(t.user)
             else:
                 self._direct[(t.relation, t.object)].add(t.user)
 
@@ -99,18 +100,20 @@ class LocalAuthorizationStore:
             )
         if self._has_direct("manager", department, user):
             return True
-        parent = self._parent.get(department)
-        if parent is None:
-            return False
-        return self._manager_chain(user, parent, _depth + 1)
+        # OR across every parent — a department can have more than one in the model.
+        return any(
+            self._manager_chain(user, parent, _depth + 1)
+            for parent in self._parent.get(department, ())
+        )
 
     def _department_viewer(self, user: str, department: str) -> bool:
         """`member or manager_chain`."""
         return self._has_direct("member", department, user) or self._manager_chain(user, department)
 
     def _tenant_relation(self, user: str, obj: str, relation: str) -> bool:
-        tenant = self._tenant_of.get(obj)
-        return tenant is not None and self._has_direct(relation, tenant, user)
+        return any(
+            self._has_direct(relation, tenant, user) for tenant in self._tenant_of.get(obj, ())
+        )
 
     # ── the interface ───────────────────────────────────────────────────────
     def check(self, *, user: str, relation: str, object: str) -> bool:
@@ -128,9 +131,9 @@ class LocalAuthorizationStore:
             return self._has_direct(relation, object, user)
 
         if type_ == "expense":
-            department = self._dept_of_expense.get(object)
+            departments = self._dept_of_expense.get(object, set())
             is_owner = self._has_direct("owner", object, user)
-            is_approver = department is not None and self._has_direct("manager", department, user)
+            is_approver = any(self._has_direct("manager", d, user) for d in departments)
             if relation == "owner":
                 return is_owner
             if relation == "approver":
@@ -151,11 +154,14 @@ class LocalAuthorizationStore:
         if type_ == "policy_document":
             if relation != "reader":
                 return False
-            scope = self._scope_of_doc.get(object)
-            if scope and self._department_viewer(user, scope):
+            if any(
+                self._department_viewer(user, scope) for scope in self._scope_of_doc.get(object, ())
+            ):
                 return True
-            tenant_scope = self._tenant_scope_of_doc.get(object)
-            if tenant_scope is not None and self._has_direct("employee", tenant_scope, user):
+            if any(
+                self._has_direct("employee", tenant_scope, user)
+                for tenant_scope in self._tenant_scope_of_doc.get(object, ())
+            ):
                 return True
             return self._tenant_relation(user, object, "auditor") or self._tenant_relation(
                 user, object, "finance"
@@ -166,8 +172,17 @@ class LocalAuthorizationStore:
 
         return False
 
+    #: Object types this store knows about. An unknown type used to yield an empty
+    #: candidate set and therefore an empty result — indistinguishable from a correct
+    #: denial, which is the exact anti-pattern `store.py` argues against.
+    KNOWN_TYPES = frozenset({"department", "expense", "policy_document", "tenant"})
+
     def list_objects(self, *, user: str, relation: str, type: str) -> list[str]:
         self._require_available()
+        if relation not in self.KNOWN_RELATIONS:
+            raise FailClosedError("unknown relation", relation=relation)
+        if type not in self.KNOWN_TYPES:
+            raise FailClosedError("unknown object type", type=type)
         candidates = sorted(self._objects_by_type.get(type, ()))
         return [
             obj.split(":", 1)[1]
@@ -175,10 +190,53 @@ class LocalAuthorizationStore:
             if self.check(user=user, relation=relation, object=obj)
         ]
 
+    # ── mutation ────────────────────────────────────────────────────────────
+    #: Relations held in the single-valued structural maps rather than in `_direct`.
+    _STRUCTURAL: ClassVar[Mapping[str, str]] = MappingProxyType(
+        {
+            "parent": "_parent",
+            "department": "_dept_of_expense",
+            "tenant": "_tenant_of",
+            "scope": "_scope_of_doc",
+            "tenant_scope": "_tenant_scope_of_doc",
+        }
+    )
+
+    def _apply(self, tuple_: RelationTuple, *, add: bool) -> None:
+        """Add or remove one tuple, routing by relation exactly as `__init__` does.
+
+        An earlier version only touched `_direct`, so revoking a `scope` or
+        `tenant_scope` tuple was a **silent no-op that returned success** — the
+        operational equivalent of "un-publish this leaked policy document" reporting
+        done while the document stayed readable. Grants of the same relations were
+        the mirror no-op. Both now route correctly, and an unknown relation raises
+        rather than falling through.
+        """
+        attribute = self._STRUCTURAL.get(tuple_.relation)
+        if attribute is not None:
+            mapping: dict[str, set[str]] = getattr(self, attribute)
+            if add:
+                mapping[tuple_.object].add(tuple_.user)
+                self._objects_by_type[tuple_.object.split(":", 1)[0]].add(tuple_.object)
+            else:
+                mapping.get(tuple_.object, set()).discard(tuple_.user)
+            return
+
+        if tuple_.relation not in self.KNOWN_RELATIONS:
+            raise FailClosedError(
+                "refusing to mutate an unknown relation", relation=tuple_.relation
+            )
+        if add:
+            self._direct[(tuple_.relation, tuple_.object)].add(tuple_.user)
+        else:
+            self._direct.get((tuple_.relation, tuple_.object), set()).discard(tuple_.user)
+
     def revoke(self, tuple_: RelationTuple) -> None:
-        """Remove a tuple. Takes effect on the very next query — there is no cache to
-        go stale, which is the property `test_revocation_is_immediate` asserts."""
-        self._direct.get((tuple_.relation, tuple_.object), set()).discard(tuple_.user)
+        """Remove a tuple. Takes effect on the very next query — this store holds no
+        cache, so there is no staleness window. Note that this is a property of *this*
+        implementation; see `OpenFGAStore` for the consistency setting that makes the
+        same claim true against a real server."""
+        self._apply(tuple_, add=False)
 
     def grant(self, tuple_: RelationTuple) -> None:
-        self._direct[(tuple_.relation, tuple_.object)].add(tuple_.user)
+        self._apply(tuple_, add=True)

@@ -1,0 +1,95 @@
+"""Model gateway regression tests — each one is a budget or redaction hole an audit found."""
+
+from __future__ import annotations
+
+import threading
+
+import pytest
+
+from fsa_gateway import BudgetExceededError, EchoProvider, ModelGateway, Route
+from fsa_telemetry import new_run_id
+
+
+class ExpensiveProvider(EchoProvider):
+    name = "expensive"
+
+    def price_per_million(self) -> tuple[float, float]:
+        return (1_000_000.0, 1_000_000.0)
+
+
+def _gateway(**kwargs) -> ModelGateway:  # type: ignore[no-untyped-def]
+    return ModelGateway(
+        {"triage": Route("triage", EchoProvider(), max_cost_usd_per_call=1.0)}, **kwargs
+    )
+
+
+def test_prompt_pii_is_scrubbed_before_the_provider_sees_it() -> None:
+    """The control was inverted: only the local log was redacted, so the card number
+    reached the provider and the only clean copy was the one we already controlled."""
+    seen: list[str] = []
+
+    class Recording(EchoProvider):
+        def complete(self, prompt, **kwargs):  # type: ignore[no-untyped-def]
+            seen.append(prompt)
+            return super().complete(prompt, **kwargs)
+
+    gw = ModelGateway({"triage": Route("triage", Recording())})
+    gw.complete(
+        "triage",
+        "Reimburse card 4539 1488 0343 6467 for Rajesh",
+        run_id=new_run_id(),
+        prompt_template_id="t.v1",
+    )
+    assert "4539" not in seen[0], "card number reached the provider"
+    assert "[REDACTED:CARD_NUMBER]" in seen[0]
+
+
+def test_a_single_call_cannot_exceed_the_budget() -> None:
+    """The check compared already-recorded spend against the cap and never estimated
+    the call it was authorising, so one call could spend anything."""
+    gw = ModelGateway(
+        {"triage": Route("triage", ExpensiveProvider(), max_cost_usd_per_call=10_000.0)},
+        daily_budget_usd=0.01,
+    )
+    with pytest.raises(BudgetExceededError):
+        gw.complete("triage", "x" * 4000, run_id=new_run_id(), prompt_template_id="t.v1")
+    assert gw.spent_usd == 0.0
+
+
+def test_per_call_cap_is_enforced_before_the_call_not_logged_after() -> None:
+    gw = ModelGateway(
+        {"triage": Route("triage", ExpensiveProvider(), max_cost_usd_per_call=0.001)},
+        daily_budget_usd=100.0,
+    )
+    with pytest.raises(BudgetExceededError):
+        gw.complete("triage", "x" * 4000, run_id=new_run_id(), prompt_template_id="t.v1")
+
+
+def test_concurrent_calls_cannot_race_past_the_budget() -> None:
+    """50 concurrent calls against the cap previously spent 10x it with zero denials."""
+    gw = ModelGateway(
+        {"triage": Route("triage", ExpensiveProvider(), max_cost_usd_per_call=1.0)},
+        daily_budget_usd=5.0,
+    )
+    denied = []
+
+    def call() -> None:
+        try:
+            gw.complete("triage", "x" * 4000, run_id=new_run_id(), prompt_template_id="t.v1")
+        except BudgetExceededError:
+            denied.append(1)
+
+    threads = [threading.Thread(target=call) for _ in range(50)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert gw.spent_usd <= 5.0, f"budget overrun: {gw.spent_usd}"
+    assert denied, "no calls were denied despite exceeding the cap"
+
+
+def test_every_call_is_logged() -> None:
+    gw = _gateway()
+    gw.complete("triage", "hello", run_id=new_run_id(), prompt_template_id="t.v1")
+    kinds = {r.kind for r in gw.interaction_log.records}
+    assert "llm" in kinds and "guardrail" in kinds

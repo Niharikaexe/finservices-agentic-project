@@ -89,8 +89,12 @@ class InMemoryVectorStore:
         allowed = set(allowed_document_ids)
 
         # ── the predicate, applied BEFORE any scoring ───────────────────────
-        # Three independent conditions, matching the three layers of defence in §10:
-        # tenant (defence in depth behind RLS), ACL (object-level), and temporal.
+        # Three independent conditions: tenant, ACL (object-level) and temporal.
+        # NOTE on the tenant check: §10 describes it as defence in depth *behind* RLS,
+        # but RLS does not exist yet (M1), so today it is the only tenant control on
+        # this path. `test_tenant_predicate_is_load_bearing` exists because without it
+        # this line can be deleted and every other test still passes — the generated
+        # document ids happen to be tenant-prefixed, so the ACL list masks it.
         candidate_idx = [
             i
             for i, chunk in enumerate(self._chunks)
@@ -109,15 +113,20 @@ class InMemoryVectorStore:
         return [(self._chunks[candidate_idx[int(i)]], float(scores[int(i)])) for i in order]
 
 
-#: The same query for Postgres + pgvector. Note that the ACL is `= ANY($3)` inside the
-#: WHERE clause, so the index scan and the ORDER BY both happen over the permitted set
-#: only. RLS on `tenant_id` is the primary tenant defence; the explicit `tenant_id = $2`
-#: is defence in depth, and the ACL list is the object-level layer on top.
+#: The same query for Postgres + pgvector, kept beside the in-memory implementation so
+#: the two predicates can be diffed by eye.
+#:
+#: NOT YET EXERCISED. There is no `policy_chunks` table, no migration and no row-level
+#: security in this repo — those land with the ledger service in M1. Until then the
+#: `tenant_id` predicate below is the *only* tenant control on this path, not one of
+#: three layers, and this string is documentation rather than a tested query. An
+#: earlier version of this comment claimed "RLS also enforces this", which was false
+#: and is exactly the kind of claim that costs more trust than the missing feature.
 PGVECTOR_SEARCH_SQL = """
 SELECT chunk_id, document_id, content, rule_ref,
        embedding <=> $1 AS distance
 FROM policy_chunks
-WHERE tenant_id = $2                       -- RLS also enforces this
+WHERE tenant_id = $2                       -- RLS will also enforce this (M1)
   AND document_id = ANY($3)                -- ACL as predicate, not post-filter
   AND effective_from <= $4
   AND (effective_to IS NULL OR effective_to > $4)

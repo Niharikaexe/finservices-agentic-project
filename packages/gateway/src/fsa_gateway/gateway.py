@@ -19,13 +19,15 @@ four JD requirements true at once rather than aspirational:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any
 
 from fsa_common import ArgusError, get_logger
 from fsa_gateway.provider import Completion, ModelProvider
 from fsa_guardrails import scan_pii
-from fsa_telemetry import InteractionLog, LlmRecord
+from fsa_telemetry import GuardrailRecord, InteractionLog, LlmRecord
 from fsa_telemetry.metrics import LLM_COST, LLM_LATENCY, LLM_TOKENS
 
 log = get_logger(__name__)
@@ -76,10 +78,38 @@ class ModelGateway:
         self._log = interaction_log or InteractionLog(redactor=_pii_redactor)
         self._daily_budget = daily_budget_usd
         self._spent = 0.0
+        # A real date, not "since this process started". Without it the budget was
+        # neither daily nor durable: a long-lived process was capped at $5 forever,
+        # and a restart — which scale-to-zero makes routine — granted a fresh $5.
+        self._spent_on: date = datetime.now(UTC).date()
+        # check-and-reserve must be atomic. 50 concurrent $1 calls against a $5 cap
+        # previously spent $50 with zero denials.
+        self._lock = threading.Lock()
 
     @property
     def spent_usd(self) -> float:
         return round(self._spent, 6)
+
+    def _reserve(self, estimate: float, route_name: str) -> None:
+        """Reserve budget BEFORE the call, or refuse.
+
+        The old check compared already-recorded spend against the cap and never
+        estimated the call it was about to authorise, so a single call could spend
+        anything. The real bound was `daily_budget + unbounded`.
+        """
+        with self._lock:
+            today = datetime.now(UTC).date()
+            if today != self._spent_on:
+                self._spent, self._spent_on = 0.0, today
+            if self._spent + estimate > self._daily_budget:
+                raise BudgetExceededError(
+                    "call would exceed the daily LLM budget",
+                    spent_usd=round(self._spent, 4),
+                    estimate_usd=round(estimate, 4),
+                    budget_usd=self._daily_budget,
+                    route=route_name,
+                )
+            self._spent += estimate  # reserve now, reconcile after
 
     def complete(
         self,
@@ -95,21 +125,51 @@ class ModelGateway:
         if route is None:
             raise ArgusError("unknown route", route=route_name)
 
-        if self._spent >= self._daily_budget:
+        # ── input rail BEFORE the provider sees the prompt ──────────────────
+        # This was inverted: the redactor ran only inside the interaction log, so the
+        # card number reached the provider and the only clean copy was the one we
+        # already controlled. Scrub outbound first.
+        input_verdict = scan_pii(prompt, direction="input")
+        if input_verdict.action == "block":
+            raise ArgusError("prompt rejected by the PII rail", route=route_name)
+        safe_prompt = input_verdict.sanitised
+        self._log.write(
+            GuardrailRecord(
+                run_id=run_id,
+                rail="pii",
+                direction="input",
+                action=input_verdict.action,
+                reasons=list(input_verdict.reasons),
+                latency_ms=0.0,
+            )
+        )
+
+        # ── reserve budget against a worst-case estimate ────────────────────
+        input_price, output_price = route.provider.price_per_million()
+        estimate = (
+            len(safe_prompt) / 4 * input_price + route.max_tokens * output_price
+        ) / 1_000_000
+        if estimate > route.max_cost_usd_per_call:
             raise BudgetExceededError(
-                "daily LLM budget exhausted",
-                spent_usd=round(self._spent, 4),
-                budget_usd=self._daily_budget,
+                "call would exceed the per-call cost cap",
+                estimate_usd=round(estimate, 5),
+                cap_usd=route.max_cost_usd_per_call,
                 route=route_name,
             )
+        self._reserve(estimate, route_name)
 
         completion = route.provider.complete(
-            prompt,
+            safe_prompt,
             max_tokens=route.max_tokens,
             temperature=route.temperature,
             json_schema=json_schema,
         )
-        self._spent += completion.cost_usd
+        # Reconcile the reservation against what was actually billed. A provider that
+        # reports no usage is charged the estimate, never zero — otherwise a missing
+        # `usageMetadata` field makes every call free and the cap never binds.
+        actual = completion.cost_usd if completion.cost_usd > 0 else estimate
+        with self._lock:
+            self._spent += actual - estimate
 
         # ── metrics: low cardinality only. No user id, no run id, no prompt text.
         LLM_TOKENS.labels(
@@ -138,7 +198,7 @@ class ModelGateway:
                 provider=completion.provider,
                 model=completion.model,
                 prompt_template_id=prompt_template_id,
-                rendered_prompt=prompt,
+                rendered_prompt=safe_prompt,
                 output=completion.text,
                 parameters={
                     "max_tokens": route.max_tokens,

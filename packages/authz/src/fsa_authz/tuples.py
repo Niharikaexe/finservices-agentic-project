@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
+from fsa_common import ValidationError
+
 
 @dataclass(frozen=True, slots=True)
 class RelationTuple:
@@ -30,6 +32,19 @@ class RelationTuple:
 
 def obj(type_: str, id_: str) -> str:
     return f"{type_}:{id_}"
+
+
+def _require_id(value: str | None, field: str) -> None:
+    """Reject empty, whitespace-only and None ids before they become tuples.
+
+    Every id in this module ends up inside an object string like
+    `department:{id}`. An empty id produces `department:` and a None produces the
+    literal `department:None` — a shared pseudo-department that every id-less user
+    in every tenant would land in. Validate at the boundary; nothing downstream can
+    tell a bad id from a good one.
+    """
+    if value is None or not value.strip():
+        raise ValidationError("empty or missing identifier", field=field, value=repr(value))
 
 
 def build_tuples(
@@ -63,25 +78,44 @@ def build_tuples(
             )
 
     for user_id, tenant_id, department_id, role in users:
+        _require_id(user_id, "user_id")
+        _require_id(tenant_id, "tenant_id")
+        _require_id(department_id, "department_id")
         subject = obj("user", user_id)
         # Every user is an employee of their tenant — this is what makes a tenant-wide
         # policy document readable without writing a tuple per department.
         out.append(RelationTuple(subject, "employee", obj("tenant", tenant_id)))
 
-        if role == "manager":
-            out.append(RelationTuple(subject, "manager", obj("department", department_id)))
-        elif role in {"auditor", "finance", "admin"}:
-            # Deliberately NOT a department member. The auditor reads through the
-            # tenant relation; the admin reads nothing. Making them members would
-            # quietly grant department-scoped access and is the classic mistake.
-            out.append(RelationTuple(subject, role, obj("tenant", tenant_id)))
-        else:
-            out.append(RelationTuple(subject, "member", obj("department", department_id)))
+        match role:
+            case "manager":
+                out.append(RelationTuple(subject, "manager", obj("department", department_id)))
+            case "auditor" | "finance" | "admin":
+                # Deliberately NOT a department member. The auditor reads through the
+                # tenant relation; the admin reads nothing. Making them members would
+                # quietly grant department-scoped access and is the classic mistake.
+                out.append(RelationTuple(subject, role, obj("tenant", tenant_id)))
+            case "employee":
+                out.append(RelationTuple(subject, "member", obj("department", department_id)))
+            case _:
+                # An unrecognised role used to fall through to `member`, which made
+                # the default branch a GRANT. A mis-cased "Admin" or an IdP role we
+                # have not mapped became a member of the root department and
+                # inherited its addendum — precisely the mistake the comment above
+                # warns about. The default is now a hard failure.
+                raise ValidationError("unknown role; refusing to write tuples", role=role)
 
     for document_id, tenant_id, scope_department_id in policy_documents:
+        _require_id(document_id, "document_id")
+        _require_id(tenant_id, "tenant_id")
         target = obj("policy_document", document_id)
         out.append(RelationTuple(obj("tenant", tenant_id), "tenant", target))
-        if scope_department_id:
+        # `is not None`, not truthiness. An empty-string scope — which is what a
+        # Postgres column that is '' rather than NULL produces — used to take the
+        # else branch and publish a department-scoped document to EVERY employee in
+        # the tenant. The falsy check made the branch that decides a document's blast
+        # radius fail open.
+        if scope_department_id is not None:
+            _require_id(scope_department_id, "scope_department_id")
             out.append(RelationTuple(obj("department", scope_department_id), "scope", target))
         else:
             out.append(RelationTuple(obj("tenant", tenant_id), "tenant_scope", target))

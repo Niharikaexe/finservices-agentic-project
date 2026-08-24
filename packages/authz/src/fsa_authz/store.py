@@ -7,9 +7,17 @@ Two implementations sit behind this Protocol:
                                something that only works when docker is up.
   `OpenFGAStore`             — the real thing over HTTP.
 
-Both must agree. `tests/authz/test_parity.py` runs the identical probe set through
-each and asserts identical verdicts, which is what makes the local one trustworthy as
-a stand-in rather than a second, divergent implementation of the rules.
+Both must agree — and **that agreement is currently asserted by review, not by a
+test.** A parity suite (run OpenFGA in a container, load `infra/openfga/model.fga`,
+push the same tuples through both stores, assert identical verdicts over the full
+probe matrix) is the missing piece that would make the local store trustworthy as a
+stand-in rather than a second, possibly divergent, implementation of the rules. It is
+the top item in `docs/milestones.md`.
+
+Two divergences are known and documented today: the local store holds the
+single-valued structural relations (`scope`, `parent`, `tenant`) as one value each
+where OpenFGA holds a set, and it returns `False` for relation/type combinations where
+OpenFGA would return a 400. Both fail closed. Neither is a substitute for the test.
 
 `list_objects` is not a convenience. It is the API that makes filter-before-rank
 possible: one round trip returns every document this principal may read, and that list

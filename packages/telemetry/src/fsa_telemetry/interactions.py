@@ -36,6 +36,7 @@ endpoint into one schema and cost comparison is a groupby, not a migration.
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -157,7 +158,7 @@ class InteractionLog:
         self,
         path: Path | None = None,
         *,
-        redactor: Callable[[str], str] | None = None,
+        redactor: Callable[[str], str] | None,
     ) -> None:
         """`redactor` is injected, not imported.
 
@@ -167,8 +168,11 @@ class InteractionLog:
         is scrubbed, only that it is, so a service with a different classification
         policy passes its own redactor and nothing here changes.
 
-        Passing `None` disables redaction and is only correct for text you generated
-        yourself. `fsa_gateway` wires the real rail in.
+        `redactor` is **keyword-only and required** — it has no default. It used to
+        default to `None`, which meant `InteractionLog(path)` silently wrote every
+        prompt and output raw. A control whose default is "off" is not a control, and
+        CLAUDE.md's rule is fail closed. Pass `redactor=None` explicitly, and only for
+        text you generated yourself.
         """
         self._path = path
         self._redactor = redactor
@@ -179,31 +183,86 @@ class InteractionLog:
     def _scrub(self, text: str) -> str:
         return self._redactor(text) if self._redactor is not None else text
 
-    def _redact_record(self, record: Record) -> Record:
-        """Return a redacted copy. Redaction happens ONCE, here, before the record is
-        either buffered or written.
+    #: Fields that are structural rather than content. Everything else is scrubbed.
+    _STRUCTURAL_FIELDS = frozenset(
+        {
+            "kind",
+            "run_id",
+            "at",
+            "schema_version",
+            "provider",
+            "model",
+            "tenant_id",
+            "direction",
+            "action",
+            "rail",
+            "tool",
+            "outcome",
+            "workflow",
+            "finish_reason",
+        }
+    )
 
-        An earlier version of this scrubbed only the serialised payload, so the file
-        on disk was clean while `log.records` still held the raw card number in
-        memory — and the eval pipeline reads `.records`. Redacting the record itself
-        removes the possibility: there is no unredacted copy to leak.
+    def _scrub_value(self, value: Any) -> Any:
+        """Recursively scrub every string leaf."""
+        if isinstance(value, str):
+            return self._scrub(value)
+        if isinstance(value, list):
+            return [self._scrub_value(v) for v in value]
+        if isinstance(value, dict):
+            return {k: self._scrub_value(v) for k, v in value.items()}
+        return value
+
+    def _redact_record(self, record: Record) -> Record:
+        """Return a redacted deep copy.
+
+        Two audit findings closed here. First, an earlier version scrubbed only three
+        named fields — so `returned_citations`, `reasons`, `parameters`,
+        `authz_decision` and `argument_digest` all carried PII to disk unredacted,
+        while the module docstring claimed everything was scrubbed. Every string leaf
+        is now walked.
+
+        Second, the record is reconstructed via `asdict` **unconditionally**, even
+        when there is no redactor. `GuardrailRecord.reasons` is a mutable list on a
+        frozen dataclass: storing the caller's object by reference let a caller mutate
+        a record after it was written, which is not what "append-only" means.
         """
-        if self._redactor is None:
-            return record
         payload: dict[str, Any] = asdict(record)
-        for key in ("query", "rendered_prompt", "output"):
-            value = payload.get(key)
-            if isinstance(value, str):
-                payload[key] = self._scrub(value)
+        if self._redactor is not None:
+            payload = {
+                key: value if key in self._STRUCTURAL_FIELDS else self._scrub_value(value)
+                for key, value in payload.items()
+            }
         return type(record)(**payload)
 
     # ── writing ─────────────────────────────────────────────────────────────
     def write(self, record: Record) -> None:
         safe = self._redact_record(record)
+        # Serialise BEFORE buffering. `parameters` is `dict[str, Any]`, so a Decimal
+        # or a numpy float used to raise out of `write()` after the buffer had been
+        # appended — leaving the in-memory log and the file disagreeing, after the
+        # provider had already been paid. `allow_nan=False` because bare NaN is not
+        # valid JSON and poisons the cost dashboard downstream.
+        try:
+            line = json.dumps(asdict(safe), separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            line = json.dumps(
+                {
+                    "kind": "serialisation_error",
+                    "run_id": safe.run_id,
+                    "schema_version": SCHEMA_VERSION,
+                    "at": _now(),
+                    "original_kind": safe.kind,
+                    "error": str(exc)[:200],
+                },
+                separators=(",", ":"),
+            )
         self._buffer.append(safe)
         if self._path is not None:
             with self._path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(asdict(safe), separators=(",", ":")) + "\n")
+                handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())  # an audit log the page cache can lose is not one
 
     @property
     def records(self) -> list[Record]:
