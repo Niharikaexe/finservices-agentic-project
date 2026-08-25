@@ -189,3 +189,94 @@ def test_no_schema_means_no_constraint(monkeypatch: pytest.MonkeyPatch) -> None:
     sent = _stub(monkeypatch, _ok_body("{}"))
     GeminiProvider().complete("hi")
     assert "responseSchema" not in sent[0]["generationConfig"]
+
+
+# ── retry on transient failures ─────────────────────────────────────────────
+
+
+def _sequence(
+    monkeypatch: pytest.MonkeyPatch, responses: list[tuple[int, dict[str, Any]]]
+) -> dict[str, list]:
+    """Serve `responses` in order, recording sleeps instead of taking them."""
+    calls: dict[str, list] = {"posts": [], "sleeps": []}
+
+    def fake_post(url: str, **kwargs: Any) -> httpx.Response:
+        status, body = responses[min(len(calls["posts"]), len(responses) - 1)]
+        calls["posts"].append(kwargs["json"])
+        headers = body.pop("__headers__", {})
+        return httpx.Response(
+            status, json=body, headers=headers, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr("fsa_gateway.provider.time.sleep", lambda s: calls["sleeps"].append(s))
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key-not-a-real-one")
+    return calls
+
+
+_THROTTLED = (429, {"error": {"code": 429, "message": "Too Many Requests"}})
+
+
+def test_a_rate_limit_is_retried_and_recovers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observed live on a free-tier key: the traffic generator, running strictly
+    serially, still tripped 429 and every affected request degraded to a refusal. A
+    rate limit clears on its own, so refusing the user is the wrong response to it."""
+    calls = _sequence(monkeypatch, [_THROTTLED, _THROTTLED, (200, _ok_body('{"ok": 1}'))])
+    completion = GeminiProvider().complete("hi")
+
+    assert completion.text == '{"ok": 1}'
+    assert completion.retries == 2, "the retry count must survive for the SLI"
+    assert calls["sleeps"] == [1.0, 2.0], "exponential, not a busy loop"
+
+
+def test_retries_are_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unbounded retry against a sustained rate limit is a self-inflicted outage: the
+    request never returns and the caller's timeout budget is spent waiting."""
+    calls = _sequence(monkeypatch, [_THROTTLED])
+    with pytest.raises(httpx.HTTPStatusError):
+        GeminiProvider(max_retries=2).complete("hi")
+    assert len(calls["posts"]) == 3, "the original call plus exactly two retries"
+
+
+def test_the_provider_backoff_hint_wins_over_our_guess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the server says how long to wait, guessing is how a fleet of clients
+    synchronises into a thundering herd."""
+    throttled = (429, {"error": {}, "__headers__": {"retry-after": "7"}})
+    calls = _sequence(monkeypatch, [throttled, (200, _ok_body("{}"))])
+    GeminiProvider().complete("hi")
+    assert calls["sleeps"] == [7.0]
+
+
+def test_a_permanent_failure_is_never_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retired model id returns the same 404 forever. Retrying it spends rate-limit
+    budget to reach the identical answer more slowly, turning a config error into a
+    latency problem that hides the config error."""
+    calls = _sequence(
+        monkeypatch, [(404, {"error": {"code": 404, "message": "no longer available"}})]
+    )
+    with pytest.raises(ModelUnavailableError):
+        GeminiProvider().complete("hi")
+    assert len(calls["posts"]) == 1
+    assert calls["sleeps"] == []
+
+
+def test_a_clean_call_reports_no_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _sequence(monkeypatch, [(200, _ok_body("{}"))])
+    assert GeminiProvider().complete("hi").retries == 0
+    assert calls["sleeps"] == []
+
+
+def test_field_descriptions_reach_the_model() -> None:
+    """Descriptions on `PolicyAnswer` are not documentation — the provider renders
+    them into `responseSchema`, so they are the instruction the model reads.
+
+    This is load-bearing. Without the minor-units description, flash-lite returned
+    1500000 for Rs 15,000 and 5000 for Rs 5,000 in consecutive calls: inferring the
+    unit from the field name and getting it right by luck. Drop these and the failure
+    is silent, intermittent, and off by 100x on money.
+    """
+    schema = _to_gemini_schema(PolicyAnswer.model_json_schema())
+    limit = schema["properties"]["applicable_limit_minor"]
+    assert "MINOR" in limit["description"]
+    assert "500000" in limit["description"], "the worked example is what fixed it"
+    assert schema["properties"]["citations"]["items"]["properties"]["rule_ref"]["description"]

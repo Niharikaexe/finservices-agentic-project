@@ -92,6 +92,18 @@ TASKS: dict[str, tuple[str, list[list[str]]]] = {
             ]
         ],
     ),
+    "trace": (
+        "List recent runs from the interaction log (add --run <id> to drill in)",
+        [[UV, "run", "python", "scripts/trace.py"]],
+    ),
+    "trace-degraded": (
+        "Only the runs that refused, and why",
+        [[UV, "run", "python", "scripts/trace.py", "--degraded"]],
+    ),
+    "cost": (
+        "Spend, tokens and latency per model, from the log",
+        [[UV, "run", "python", "scripts/trace.py", "--cost"]],
+    ),
     # ── data and measurement ────────────────────────────────────────────────
     "simulate": (
         "Generate the synthetic world into data/worlds/seed-<n>/",

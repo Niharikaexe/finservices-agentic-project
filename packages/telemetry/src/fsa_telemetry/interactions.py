@@ -111,6 +111,11 @@ class LlmRecord:
     finish_reason: str = "stop"
     structured_output_valid: bool | None = None
     repair_attempts: int = 0
+    #: Transient-failure retries the provider absorbed before this call succeeded.
+    #: Recorded because `latency_ms` is wall time and therefore includes the backoff
+    #: waits — without this field a rate-limited call and a genuinely slow model are
+    #: the same 24-second number, and the two have nothing in common.
+    retries: int = 0
     kind: Literal["llm"] = "llm"
     schema_version: int = SCHEMA_VERSION
     at: str = field(default_factory=_now)

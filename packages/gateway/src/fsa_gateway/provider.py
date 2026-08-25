@@ -20,7 +20,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from fsa_common import ArgusError
+from fsa_common import ArgusError, get_logger
+
+log = get_logger(__name__)
 
 
 class ModelUnavailableError(ArgusError):
@@ -48,6 +50,11 @@ class Completion:
     latency_ms: float
     finish_reason: str = "stop"
     raw: dict[str, Any] | None = None
+    #: How many times the call was retried before it succeeded. Zero on the happy
+    #: path. Worth carrying because a route that quietly retries twice on every call
+    #: has three times the rate-limit footprint and three times the tail latency, and
+    #: neither shows up in a success rate.
+    retries: int = 0
 
 
 class ModelProvider(Protocol):
@@ -119,6 +126,27 @@ class EchoProvider:
 
 # ── Gemini ──────────────────────────────────────────────────────────────────
 
+#: Statuses worth trying again. 429 is a rate limit and 5xx is the provider having a
+#: moment; both clear on their own. Everything else is a permanent condition where a
+#: retry produces the same failure later, having spent quota to get there.
+_RETRYABLE = frozenset({429, 500, 502, 503, 504})
+
+
+def _retry_after(response: Any) -> float | None:
+    """Honour the provider's own backoff hint when it gives one.
+
+    Guessing an interval when the server has told you the answer is how a fleet of
+    clients synchronises into a thundering herd against a rate limit.
+    """
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, min(float(raw), 30.0))
+    except ValueError:
+        return None  # the HTTP-date form; the exponential fallback covers it
+
+
 #: Keys Gemini's `responseSchema` accepts. It takes an OpenAPI 3.0 subset, not full
 #: JSON Schema, and rejects the request outright on an unknown key rather than
 #: ignoring it — so unsupported keys are dropped rather than passed through.
@@ -165,14 +193,19 @@ def _to_gemini_schema(schema: dict[str, Any], defs: dict[str, Any] | None = None
     if "anyOf" in schema:
         variants = [v for v in schema["anyOf"] if v.get("type") != "null"]
         nullable = len(variants) != len(schema["anyOf"])
+        # `description` and friends sit as SIBLINGS of `anyOf`, not inside the
+        # variants. Recursing into the variant alone silently dropped them — and
+        # since descriptions are what the model actually reads, the field whose
+        # instruction mattered most (minor units) was the one that lost it.
+        siblings = {k: v for k, v in schema.items() if k in _GEMINI_SCHEMA_KEYS}
         if len(variants) == 1:
-            out = _to_gemini_schema(variants[0], defs)
+            out = {**_to_gemini_schema(variants[0], defs), **siblings}
             if nullable:
                 out["nullable"] = True
             return out
         # A genuine union. Gemini cannot express it, so fall back to an unconstrained
         # value and let pydantic reject a bad one downstream.
-        return {"type": "string", "nullable": nullable}
+        return {**siblings, "type": "string", "nullable": nullable}
 
     out = {k: v for k, v in schema.items() if k in _GEMINI_SCHEMA_KEYS}
     if "properties" in schema:
@@ -212,16 +245,18 @@ class GeminiProvider:
 
     def __init__(
         self,
-        model: str = "gemini-3.6-flash",
+        model: str = "gemini-3.5-flash-lite",
         *,
-        input_price: float = 0.30,
-        output_price: float = 2.50,
+        input_price: float = 0.10,
+        output_price: float = 0.40,
         timeout_seconds: float = 60.0,
+        max_retries: int = 3,
     ) -> None:
         self.model = model
         self._input_price = input_price
         self._output_price = output_price
         self._timeout = timeout_seconds
+        self._max_retries = max_retries
 
     def price_per_million(self) -> tuple[float, float]:
         return (self._input_price, self._output_price)
@@ -259,13 +294,28 @@ class GeminiProvider:
             config["responseMimeType"] = "application/json"
             config["responseSchema"] = _to_gemini_schema(json_schema)
 
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config}
+        headers = {"x-goog-api-key": self._api_key(), "content-type": "application/json"}
+
         started = time.perf_counter()
-        response = httpx.post(
-            url,
-            headers={"x-goog-api-key": self._api_key(), "content-type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": config},
-            timeout=self._timeout,
-        )
+        attempt = 0
+        while True:
+            response = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
+            if response.status_code not in _RETRYABLE or attempt >= self._max_retries:
+                break
+            # Only 429 and 5xx get here. A 400 or a 404 is a permanent condition and
+            # retrying it burns the rate-limit budget to arrive at the same answer
+            # slower — which is how a broken config turns into an outage.
+            delay = _retry_after(response) or min(2.0**attempt, 8.0)
+            log.warning(
+                "provider throttled; backing off",
+                model=self.model,
+                status=response.status_code,
+                attempt=attempt + 1,
+                delay_s=round(delay, 2),
+            )
+            time.sleep(delay)
+            attempt += 1
         latency = (time.perf_counter() - started) * 1000
 
         if response.status_code == 404:
@@ -319,6 +369,7 @@ class GeminiProvider:
             ttft_ms=None,
             latency_ms=latency,
             finish_reason=finish,
+            retries=attempt,
         )
 
 

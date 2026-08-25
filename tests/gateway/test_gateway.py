@@ -93,3 +93,58 @@ def test_every_call_is_logged() -> None:
     gw.complete("triage", "hello", run_id=new_run_id(), prompt_template_id="t.v1")
     kinds = {r.kind for r in gw.interaction_log.records}
     assert "llm" in kinds and "guardrail" in kinds
+
+
+class FailingProvider(EchoProvider):
+    """A provider that always rejects — a rate limit, an outage, a bad key."""
+
+    name = "failing"
+
+    #: Priced so the per-call cap lets the call through. Priced any higher and the
+    #: cap rejects it before the provider is reached, and the test passes without
+    #: ever exercising the release path it exists to check.
+    def price_per_million(self) -> tuple[float, float]:
+        return (1.0, 1.0)
+
+    def complete(self, prompt: str, **kwargs: object):  # type: ignore[no-untyped-def, override]
+        raise RuntimeError("429 Too Many Requests")
+
+
+def test_a_failed_call_does_not_keep_its_reservation() -> None:
+    """Budget is reserved before the call and reconciled after. When the call raised,
+    the reconciliation never ran and the reservation was charged forever.
+
+    Live numbers that exposed it: 24 requests against a rate-limited free tier
+    reported $0.037 spent against $0.0057 actually billed. Sustained, a provider
+    outage exhausts the daily cap without producing a single answer — the cost control
+    becomes the outage."""
+    gateway = ModelGateway(
+        {"qa": Route("qa", FailingProvider(), max_cost_usd_per_call=1.0)},
+        daily_budget_usd=10.0,
+    )
+    for _ in range(5):
+        with pytest.raises(RuntimeError):
+            gateway.complete("qa", "a prompt", run_id=new_run_id(), prompt_template_id="t")
+
+    assert gateway.spent_usd == 0.0, "nothing was billed, so nothing may be charged"
+
+
+def test_the_budget_still_binds_after_failures() -> None:
+    """The release must not be a hole in the cap: a working call afterwards is still
+    charged, and the cap still refuses."""
+    gateway = ModelGateway(
+        {
+            "bad": Route("bad", FailingProvider(), max_cost_usd_per_call=1.0),
+            # A per-call cap high enough to be irrelevant, so it is the DAILY cap
+            # under test here and not the per-call one.
+            "good": Route("good", ExpensiveProvider(), max_cost_usd_per_call=100_000.0),
+        },
+        daily_budget_usd=0.5,
+    )
+    with pytest.raises(RuntimeError):
+        gateway.complete("bad", "x" * 40, run_id=new_run_id(), prompt_template_id="t")
+    assert gateway.spent_usd == 0.0
+
+    # ExpensiveProvider charges $1 per token, so one call cannot fit a $0.50 day.
+    with pytest.raises(BudgetExceededError):
+        gateway.complete("good", "x" * 40, run_id=new_run_id(), prompt_template_id="t")

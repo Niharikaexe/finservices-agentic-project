@@ -51,7 +51,10 @@ def _provider() -> ModelProvider:
     what they are looking at.
     """
     if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-        model = os.environ.get("ARGUS_LLM_MODEL", "gemini-3.6-flash")
+        # flash-lite by default: the free tier's rate limit is the binding constraint
+        # on a demo, not model quality, and a request that 429s teaches nobody
+        # anything. Override with ARGUS_LLM_MODEL for a quality comparison.
+        model = os.environ.get("ARGUS_LLM_MODEL", "gemini-3.5-flash-lite")
         log.info("using Gemini", model=model)
         return GeminiProvider(model=model)
 

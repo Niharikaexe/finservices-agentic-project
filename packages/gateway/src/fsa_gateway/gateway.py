@@ -166,12 +166,30 @@ class ModelGateway:
             )
         self._reserve(estimate, route_name)
 
-        completion = route.provider.complete(
-            safe_prompt,
-            max_tokens=route.max_tokens,
-            temperature=route.temperature,
-            json_schema=json_schema,
-        )
+        try:
+            completion = route.provider.complete(
+                safe_prompt,
+                max_tokens=route.max_tokens,
+                temperature=route.temperature,
+                json_schema=json_schema,
+            )
+        except Exception:
+            # Release the reservation. A failed call returned no tokens and providers
+            # do not bill rejected requests, so holding the estimate charges us for
+            # work nobody did. Observed live: 24 requests against a rate-limited free
+            # tier reported $0.037 spent against $0.0057 actually billed, because
+            # every 429 kept its reservation. Left alone, a provider outage exhausts
+            # the daily cap without producing a single answer — the budget control
+            # becomes the outage.
+            #
+            # The residual risk is a call that fails *after* the provider billed it,
+            # such as a timeout mid-generation, which is now under-counted. That is
+            # the better direction to be wrong in: under-counting a rare partial call
+            # costs pennies, while over-counting every failure costs availability.
+            with self._lock:
+                self._spent -= estimate
+            raise
+
         # Reconcile the reservation against what was actually billed. A provider that
         # reports no usage is charged the estimate, never zero — otherwise a missing
         # `usageMetadata` field makes every call free and the cap never binds.
@@ -220,6 +238,7 @@ class ModelGateway:
                 latency_ms=completion.latency_ms,
                 workflow=route_name,
                 finish_reason=completion.finish_reason,
+                retries=completion.retries,
             )
         )
 
