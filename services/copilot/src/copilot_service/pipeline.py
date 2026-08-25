@@ -38,7 +38,12 @@ from pydantic import ValidationError
 from copilot_service.schemas import Citation, PolicyAnswer
 from fsa_authz import AuthorizationStore, Principal
 from fsa_common import FailClosedError, get_logger
-from fsa_gateway import BudgetExceededError, ModelGateway
+from fsa_gateway import (
+    BudgetExceededError,
+    ModelGateway,
+    ModelUnavailableError,
+    ProviderQuotaExhaustedError,
+)
 from fsa_guardrails import UntrustedText, scan_injection, scan_pii, scan_tenant_leakage
 from fsa_retrieval import PermissionAwareRetriever, RetrievalResult
 from fsa_telemetry import GuardrailRecord, InteractionLog, RetrievalRecord, new_run_id
@@ -233,7 +238,16 @@ class PolicyPipeline:
             )
         except BudgetExceededError:
             return self._degraded(run_id, "budget_exceeded", retrieval, started, actions)
-        except Exception as exc:  # provider error, timeout, malformed response
+        except (ModelUnavailableError, ProviderQuotaExhaustedError) as exc:
+            # Both are permanent and both have a specific remedy — change the model id,
+            # or top up the account. Filed under `provider_error` they read as "the
+            # network was flaky", and the service sits there refusing every request
+            # while looking healthy on every dashboard.
+            log.error(
+                "provider misconfigured or out of credit", run_id=run_id, error=str(exc)[:300]
+            )
+            return self._degraded(run_id, exc.code, retrieval, started, actions)
+        except Exception as exc:  # timeout, transport failure, malformed response
             log.error("provider call failed", run_id=run_id, error=str(exc)[:200])
             return self._degraded(run_id, "provider_error", retrieval, started, actions)
 

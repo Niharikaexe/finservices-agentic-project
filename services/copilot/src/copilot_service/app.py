@@ -42,6 +42,33 @@ log = get_logger(__name__)
 STATE: dict[str, Any] = {}
 
 
+def _load_dotenv() -> None:
+    """Read a gitignored `.env` into the environment if it has not been read already.
+
+    `tasks.py` already does this before launching anything, so this is for the other
+    way in: `uvicorn copilot_service.app:app`, which is what a README snippet, a
+    Dockerfile CMD or an IDE run configuration will use. Without it the service starts
+    perfectly, reports `provider: echo`, and answers every question from canned text —
+    a failure that looks exactly like success until someone checks /healthz.
+
+    Real environment variables always win, so a container with the key injected from
+    Key Vault ignores any file that happens to be in the image.
+    """
+    path = Path.cwd() / ".env"
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
 def _provider() -> ModelProvider:
     """Gemini when a key is present, the deterministic stub otherwise.
 
@@ -81,6 +108,7 @@ def _provider() -> ModelProvider:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    _load_dotenv()
     settings = get_settings()
     configure_logging(level=settings.log_level, json_output=settings.log_json)
 

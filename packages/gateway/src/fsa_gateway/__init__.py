@@ -12,6 +12,8 @@ from fsa_gateway.provider import (
     EchoProvider,
     GeminiProvider,
     ModelProvider,
+    ModelUnavailableError,
+    ProviderQuotaExhaustedError,
 )
 
 __all__ = [
@@ -22,5 +24,7 @@ __all__ = [
     "GeminiProvider",
     "ModelGateway",
     "ModelProvider",
+    "ModelUnavailableError",
+    "ProviderQuotaExhaustedError",
     "Route",
 ]

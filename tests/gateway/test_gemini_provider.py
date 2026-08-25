@@ -14,7 +14,12 @@ import httpx
 import pytest
 
 from copilot_service.schemas import PolicyAnswer
-from fsa_gateway.provider import GeminiProvider, ModelUnavailableError, _to_gemini_schema
+from fsa_gateway.provider import (
+    GeminiProvider,
+    ModelUnavailableError,
+    ProviderQuotaExhaustedError,
+    _to_gemini_schema,
+)
 
 
 def _stub(monkeypatch: pytest.MonkeyPatch, body: dict[str, Any], status: int = 200) -> list[dict]:
@@ -280,3 +285,45 @@ def test_field_descriptions_reach_the_model() -> None:
     assert "MINOR" in limit["description"]
     assert "500000" in limit["description"], "the worked example is what fixed it"
     assert schema["properties"]["citations"]["items"]["properties"]["rule_ref"]["description"]
+
+
+def test_running_out_of_credit_is_not_treated_as_a_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google returns 429 RESOURCE_EXHAUSTED for "too fast" and for "out of money"
+    alike, and only the message separates them. Observed live once the key's credits
+    ran out: every request spent 9 seconds on backoff to reach a failure that could
+    never clear. Body verbatim from that call."""
+    calls = _sequence(
+        monkeypatch,
+        [
+            (
+                429,
+                {
+                    "error": {
+                        "code": 429,
+                        "status": "RESOURCE_EXHAUSTED",
+                        "message": (
+                            "Your prepayment credits are depleted. Please go to AI "
+                            "Studio at https://ai.studio/projects to manage your "
+                            "project and billing."
+                        ),
+                    }
+                },
+            )
+        ],
+    )
+    with pytest.raises(ProviderQuotaExhaustedError) as caught:
+        GeminiProvider().complete("hi")
+
+    assert len(calls["posts"]) == 1, "a billing failure must not be retried"
+    assert calls["sleeps"] == []
+    assert "credits are depleted" in str(caught.value), "the operator needs the remedy"
+
+
+def test_an_ordinary_rate_limit_is_still_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The billing check must not swallow real throttling — that would turn a
+    recoverable pause into a refusal on every burst."""
+    calls = _sequence(monkeypatch, [_THROTTLED, (200, _ok_body("{}"))])
+    GeminiProvider().complete("hi")
+    assert len(calls["posts"]) == 2

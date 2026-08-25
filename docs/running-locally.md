@@ -1,24 +1,58 @@
 # Running Argus locally
 
-No `make` required — `tasks.py` is the runner, and it works on Windows too.
-Nothing here needs docker.
+You need **Python 3.12 or newer**. Nothing else — no `make`, no `uv`, no docker.
 
 ```bash
-uv sync                                  # once
-uv run python tasks.py                   # list every task
+python3 bootstrap.py        # or python bootstrap.py, or py bootstrap.py on Windows
 ```
+
+That creates `.venv`, installs the ten workspace packages and their dependencies, and
+verifies they import. It is safe to re-run.
+
+Then:
+
+```bash
+source .venv/bin/activate            # Windows:  .venv\Scripts\activate
+python tasks.py                      # list every task
+```
+
+If you would rather not activate anything, call the venv's Python directly —
+`.venv/bin/python tasks.py serve` works identically.
+
+<details>
+<summary>Why not just <code>pip install -e .</code>?</summary>
+
+`pyproject.toml` is a **uv workspace**. Each package lists its siblings as ordinary
+dependencies — `fsa-gateway` needs `fsa-common`, `fsa-telemetry`, `fsa-guardrails` —
+and `[tool.uv.sources]` is the table that tells uv those names mean "the directory next
+door". pip does not read that table, so `pip install -e .` sends pip to PyPI looking
+for a package called `fsa-common`.
+
+That is worse than a failed install. Those names are unregistered on a public index,
+which is the setup for a dependency-confusion attack: anyone may claim them, and pip
+would pull a stranger's code into the venv of a service that makes authorisation
+decisions. `bootstrap.py` installs the workspace's own packages with `--no-deps` and
+resolves the third-party set separately. The `--no-deps` is a security control.
+
+</details>
+
+**If you do have `uv`,** everything still works and is faster — `tasks.py` detects it
+and uses it. `python tasks.py` prints which runner it picked. `uv sync` replaces
+`bootstrap.py` entirely.
 
 ## 1. Give it a key (optional)
 
-```bash
-cp .env.example .env
-# edit .env, set GOOGLE_API_KEY=...    free key: https://aistudio.google.com/apikey
+`bootstrap.py` copies `.env.example` to `.env` for you. Open it and set:
+
+```
+GOOGLE_API_KEY=...          # free key: https://aistudio.google.com/apikey
 ```
 
-`.env` is gitignored and `tasks.py` loads it automatically. **Without a key the
-service still starts and every path still runs** — it falls back to the deterministic
-`EchoProvider` and says so on `/healthz`. That is deliberate: a demo that needs a
-credential is a demo that breaks the morning the key rotates.
+`.env` is gitignored, and it is read both by `tasks.py` and by the service itself, so
+it works however you start things. **Without a key the service still starts and every
+path still runs** — it falls back to the deterministic `EchoProvider` and says so on
+`/healthz`. That is deliberate: a demo that needs a credential is a demo that breaks
+the morning the key rotates.
 
 Real environment variables override the file, which is how CI and Key Vault injection
 work in cloud.
@@ -26,7 +60,7 @@ work in cloud.
 ## 2. Start it
 
 ```bash
-uv run python tasks.py serve
+python tasks.py serve
 ```
 
 Then open **http://localhost:8080** — the dashboard is served by the process itself,
@@ -69,7 +103,7 @@ Then try the injection payload the placeholder text suggests:
 ## 4. Volume
 
 ```bash
-uv run python tasks.py traffic        # N=60 by default; N=24 uv run python tasks.py traffic
+python tasks.py traffic        # N=60 by default; N=24 python tasks.py traffic
 ```
 
 Measured on `gemini-3.5-flash-lite`, 60 requests across 3 tenants:
@@ -104,9 +138,9 @@ one-liner to load into pandas or DuckDB for the eval pipeline.
 ## The three commands
 
 ```bash
-uv run python tasks.py trace             # recent runs, one line each
-uv run python tasks.py trace-degraded    # only the ones that refused, and why
-uv run python tasks.py cost              # spend, tokens, p50/p95 latency by model
+python tasks.py trace             # recent runs, one line each
+python tasks.py trace-degraded    # only the ones that refused, and why
+python tasks.py cost              # spend, tokens, p50/p95 latency by model
 ```
 
 ```
@@ -119,8 +153,8 @@ run-2a61e27c1f6f4504    05:11:53    3       0         $0.000000  degraded before
 Then drill into any one of them:
 
 ```bash
-uv run python scripts/trace.py --run run-af7586c4      # prefix match is enough
-uv run python scripts/trace.py --run run-af7586c4 --full   # untruncated prompt + output
+python scripts/trace.py --run run-af7586c4      # prefix match is enough
+python scripts/trace.py --run run-af7586c4 --full   # untruncated prompt + output
 ```
 
 That prints the run as a timeline — every guardrail verdict, the retrieval with its
@@ -196,7 +230,7 @@ metric.
 Structured, one event per line:
 
 ```bash
-uv run python tasks.py serve 2>&1 | tee serve.log
+python tasks.py serve 2>&1 | tee serve.log
 grep -E "degraded|throttled|provider call failed" serve.log
 ```
 
@@ -207,6 +241,8 @@ Degradation reasons you may see, each with a different fix:
 | `no_permitted_context` | the user may not read anything relevant | correct, usually |
 | `authz_unavailable` | OpenFGA is down — **fail closed, deny** | restore authz |
 | `provider_error` | the model call failed after its retries | check the log line below it |
+| `provider_quota_exhausted` | the API account is out of credit | top up, or use another key |
+| `model_unavailable` | the model id was retired or is not on this key | the 404 names its replacement |
 | `output_truncated` | a reasoning model spent its whole budget thinking | raise `ARGUS_MAX_OUTPUT_TOKENS` |
 | `unparseable_output` | the model returned something unreadable | prompt or schema |
 | `ungrounded_citation` | it cited a rule it was never shown | prompt; this one is a hallucination |
@@ -221,6 +257,6 @@ file.
 ## Checking the isolation claim
 
 ```bash
-uv run python tasks.py acl        # 17 tests, probes every chunk against every user
-uv run python tasks.py measure    # ACL, retrieval latency, guardrail catch rates
+python tasks.py acl        # 17 tests, probes every chunk against every user
+python tasks.py measure    # ACL, retrieval latency, guardrail catch rates
 ```

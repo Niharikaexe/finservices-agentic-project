@@ -36,6 +36,21 @@ class ModelUnavailableError(ArgusError):
     code = "model_unavailable"
 
 
+class ProviderQuotaExhaustedError(ArgusError):
+    """The account is out of credit or over a hard quota. Not a rate limit.
+
+    Google returns 429 RESOURCE_EXHAUSTED for both "you are going too fast" and "your
+    prepayment credits are depleted", and only the message distinguishes them. They
+    could not be less alike operationally: the first clears in seconds and retrying is
+    correct, the second never clears and retrying spends the caller's latency budget
+    three times over to arrive at the same failure. Observed here — every request
+    burning 9 seconds on backoff against an account with no credit left.
+    """
+
+    http_status = 402
+    code = "provider_quota_exhausted"
+
+
 @dataclass(frozen=True, slots=True)
 class Completion:
     """One model response, provider-agnostic."""
@@ -130,6 +145,23 @@ class EchoProvider:
 #: moment; both clear on their own. Everything else is a permanent condition where a
 #: retry produces the same failure later, having spent quota to get there.
 _RETRYABLE = frozenset({429, 500, 502, 503, 504})
+
+#: Substrings that mark a 429 as billing rather than throttling. Matching on message
+#: text is fragile and it is the only signal the API gives — there is no distinct
+#: status code and no distinct `reason`. The failure mode of a wrong match is mild in
+#: both directions: a missed match costs three retries, and a false match turns a
+#: transient throttle into one clean refusal instead of a delayed one.
+_BILLING_MARKERS = ("credits are depleted", "billing", "prepayment", "quota_exceeded_for_project")
+
+
+def _billing_failure(response: Any) -> str | None:
+    """Return the provider's message if this 429 is about money, not speed."""
+    try:
+        message = response.json().get("error", {}).get("message", "")
+    except ValueError:
+        return None
+    lowered = message.lower()
+    return message if any(marker in lowered for marker in _BILLING_MARKERS) else None
 
 
 def _retry_after(response: Any) -> float | None:
@@ -301,6 +333,14 @@ class GeminiProvider:
         attempt = 0
         while True:
             response = httpx.post(url, headers=headers, json=payload, timeout=self._timeout)
+            if response.status_code == 429:
+                billing = _billing_failure(response)
+                if billing is not None:
+                    raise ProviderQuotaExhaustedError(
+                        "the provider account is out of credit or over a hard quota",
+                        model=self.model,
+                        detail=billing[:300],
+                    )
             if response.status_code not in _RETRYABLE or attempt >= self._max_retries:
                 break
             # Only 429 and 5xx get here. A 400 or a 404 is a permanent condition and

@@ -17,20 +17,38 @@ exercised against a synthetic-world simulator rather than live customers.
 
 ## Quickstart
 
+Python 3.12+ is the only prerequisite. No `make`, no `uv`, no docker.
+
 ```bash
-uv sync                 # one venv, every workspace member editable
-make test               # unit tests
-make lint               # ruff + mypy --strict + import-linter
-make simulate           # generate the synthetic world (~15s, 82k claims)
-make features           # assemble the 47-feature training matrix
-make install-ml         # add lightgbm, shap, optuna, mlflow
-make train-fraud        # train + evaluate the fraud model
-make up                 # full local stack (see ARCHITECTURE.md §7)
+python3 bootstrap.py            # creates .venv and installs everything
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+
+python tasks.py serve           # then open http://localhost:8080
+python tasks.py                 # list every task
 ```
 
-`make train-fraud` fails until `fsa_ml.fraud.train.train` is implemented — that is the
-current open task. See [docs/notebooks.md](./docs/notebooks.md) for the notebook/Colab
-policy.
+Ask a Sales employee and an Engineering employee the same question. Sales holds an
+addendum raising the client-entertainment limit to ₹15,000; Engineering does not and
+sees the global ₹5,000. Neither can retrieve the other's document — the permitted set
+is a query predicate, not a filter applied to results.
+
+```bash
+python tasks.py test            # unit tests
+python tasks.py lint            # ruff + mypy --strict + import-linter
+python tasks.py acl             # the ACL isolation suite
+python tasks.py traffic         # drive persona traffic at a running service
+python tasks.py trace           # read the interaction log back, run by run
+python tasks.py simulate        # generate the synthetic world (~15s, 82k claims)
+python tasks.py up              # full local stack (needs docker; ARCHITECTURE.md §7)
+```
+
+`uv` and `make` both still work if you have them — `tasks.py` detects `uv` and uses it,
+and the Makefile is unchanged. **[docs/running-locally.md](./docs/running-locally.md)**
+covers the run and the logging in full.
+
+`python tasks.py train-fraud` fails until `fsa_ml.fraud.train.train` is implemented —
+that is a parked task. See [docs/notebooks.md](./docs/notebooks.md) for the
+notebook/Colab policy.
 
 ## Repository map
 
