@@ -72,10 +72,23 @@ Then try the injection payload the placeholder text suggests:
 uv run python tasks.py traffic        # N=60 by default; N=24 uv run python tasks.py traffic
 ```
 
-On a free-tier key this will hit 429s. The gateway retries those with exponential
-backoff honouring `Retry-After`, so they recover rather than degrading — but a lower
-request count is kinder. Each call costs roughly $0.002 and takes 8–11 seconds,
-because `gemini-3.6-flash` is a reasoning model and most of those tokens are thinking.
+Measured on `gemini-3.5-flash-lite`, 60 requests across 3 tenants:
+
+```
+60 requests in 186.9s      answered 54   degraded 5   tripped 7   failed 1
+56 model calls             $0.00555 total ($0.00010/call)   p50 1290ms  p95 1651ms
+305 citations emitted      0 uncited
+retrieval p95              1.83 ms
+```
+
+Four of those calls hit a free-tier 429 and recovered through backoff rather than
+degrading; five exhausted their retries and refused, which is the rate limit and not
+a bug. Raise `--delay` if you want a clean run.
+
+`gemini-3.6-flash` is available too (`ARGUS_LLM_MODEL=gemini-3.6-flash`) and reasons
+noticeably better on the conflicting-addendum question, but it costs ~20x more, takes
+~8-11s per call because most of its output tokens are thinking, and rate-limits far
+sooner on the free tier.
 
 ---
 
@@ -98,8 +111,9 @@ uv run python tasks.py cost              # spend, tokens, p50/p95 latency by mod
 
 ```
 run_id                  when        stages  tokens    cost       outcome
-run-57d08e040acd48a3    05:01:22    6       1264      $0.002196  answered
-run-af7586c46ac341e1    05:02:47    3       0         $0.000000  degraded before the model was called
+run-c8ea83d4ffc749ee    05:12:47    6       582       $0.000097  answered
+run-2198c4eba2d742cd    05:11:45    1       0         $0.000000  blocked by injection rail
+run-2a61e27c1f6f4504    05:11:53    3       0         $0.000000  degraded before the model was called
 ```
 
 Then drill into any one of them:
@@ -113,21 +127,36 @@ That prints the run as a timeline — every guardrail verdict, the retrieval wit
 scores, and the exact prompt and output:
 
 ```
-05:02:47.671  GUARDRAIL
+05:12:47.672  GUARDRAIL
   rail      injection (input)
   action    allow
 
-05:02:47.673  RETRIEVAL
-  question  What is my client entertainment limit?
+05:12:47.675  RETRIEVAL
+  query     What is the lodging cap for a two night trip?
+  asked by  finance in t00/t00-dept-00   as_of=2026-03-15
   permitted 5 documents (pre-ranking)
-  returned  5 chunks in 1.81 ms
-    t02-doc-global-v2#T&E-4.1   score=0.5064
-    t02-doc-add-02#ADD-SAL-1    score=0.4478
+  returned  5 chunks in 1.59 ms
+    t00-doc-global-v1#T&E-4.2 score=0.3987
+    t00-doc-global-v1#T&E-4.1 score=0.0
 
-05:02:58.402  LLM
-  model     gemini/gemini-3.6-flash  template=policy_answer.v1
-  tokens    438 in / 826 out   $0.002196   10889 ms
+05:12:48.831  LLM
+  model     gemini/gemini-3.5-flash-lite  template=policy_answer.v1
+  tokens    453 in / 129 out   $0.000097   1154 ms
   params    {'max_tokens': 2048, 'temperature': 0.0, 'structured': True}  finish=stop
+
+  --- output ---
+  {"answer": "Lodging claims must not exceed Rs 12,000 per claim.",
+   "citations": [{"document_id": "t00-doc-global-v1", "rule_ref": "T&E-4.2",
+                  "quoted_span": "Lodging: claims must not exceed Rs 12,000 per claim."}],
+   "applicable_limit_minor": 1200000, "confidence": 1.0}
+
+05:12:48.833  GUARDRAIL
+  rail      pii (output)
+  action    allow
+
+05:12:48.833  GUARDRAIL
+  rail      tenant_leakage (output)
+  action    allow
 ```
 
 `permitted 5 documents (pre-ranking)` is the line to point at in a review. It is the

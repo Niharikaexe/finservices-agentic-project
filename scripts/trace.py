@@ -109,7 +109,11 @@ def detail(stages: list[dict[str, Any]], *, full: bool) -> None:
             # The authorisation numbers are the interesting part: `allowed_documents`
             # is the size of the permitted set BEFORE ranking, which is what proves
             # the ACL was a query predicate and not a filter applied afterwards.
-            print(f"  question  {s.get('question', '')[:100]}")
+            print(f"  query     {s.get('query', '')[:100]}")
+            print(
+                f"  asked by  {s.get('principal_role')} in {s.get('tenant_id')}"
+                f"/{s.get('principal_department')}   as_of={s.get('as_of')}"
+            )
             print(f"  permitted {s.get('allowed_document_count')} documents (pre-ranking)")
             print(
                 f"  returned  {len(s.get('returned_chunk_ids', []))} chunks in "
@@ -151,7 +155,7 @@ def costs(records: list[dict[str, Any]]) -> None:
         per[f"{r['provider']}/{r['model']}"].append(r)
 
     print(
-        f"{BOLD}{'model':<28}{'calls':<8}{'in':<10}{'out':<10}{'cost':<12}"
+        f"{BOLD}{'model':<30}{'calls':<8}{'in':<10}{'out':<10}{'cost':<12}"
         f"{'p50 ms':<10}{'p95 ms'}{OFF}"
     )
     for name, rs in per.items():
@@ -163,14 +167,14 @@ def costs(records: list[dict[str, Any]]) -> None:
         p50 = lat[len(lat) // 2]
         p95 = lat[min(len(lat) - 1, int(len(lat) * 0.95))]
         print(
-            f"{name:<28}{len(rs):<8}{sum(r['prompt_tokens'] for r in rs):<10}"
+            f"{name:<30}{len(rs):<8}{sum(r['prompt_tokens'] for r in rs):<10}"
             f"{sum(r['completion_tokens'] for r in rs):<10}"
             f"${sum(r['cost_usd'] for r in rs):<11.5f}{p50:<10.0f}{p95:.0f}"
         )
         retried = [r for r in rs if r.get("retries")]
         if retried:
             print(
-                f"{DIM}{'':<28}{len(retried)} of these were rate-limited and retried; "
+                f"{DIM}{'':<30}{len(retried)} of these were rate-limited and retried; "
                 f"percentiles above exclude them{OFF}"
             )
     total = sum(r["cost_usd"] for r in llm)
