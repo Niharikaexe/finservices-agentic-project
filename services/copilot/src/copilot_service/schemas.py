@@ -79,8 +79,14 @@ class AskResponse(BaseModel):
     # ── the observability payload: what happened, not just what was said ────
     principal_role: str
     tenant_id: str
+    # Three numbers, three different units, and the funnel only makes sense with all
+    # three. `permitted_documents` is the authorised set BEFORE ranking — the number
+    # that proves the ACL was a query predicate. `retrieved_chunks` is top-k over
+    # chunks, and a document splits into many, so 5 chunks can all come from one
+    # document. Showing the first two alone reads as "retrieved more than permitted".
     permitted_documents: int
     retrieved_chunks: int
+    retrieved_from_documents: int
     guardrail_actions: dict[str, str]
     model: str
     provider: str

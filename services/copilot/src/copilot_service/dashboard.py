@@ -153,7 +153,9 @@ async function ask(){
     d.answer+'\\n\\n'+
     '<span class="cite">citations</span>\\n'+cites+'\\n\\n'+
     'role                '+d.principal_role+'   tenant '+d.tenant_id+'\\n'+
-    'permitted documents '+d.permitted_documents+'   retrieved '+d.retrieved_chunks+'\\n'+
+    'permitted           '+d.permitted_documents+' documents (before ranking)\\n'+
+    'retrieved           '+d.retrieved_chunks+' chunks from '+d.retrieved_from_documents+
+      ' of them\\n'+
     'rails               '+JSON.stringify(d.guardrail_actions)+'\\n'+
     'model               '+d.provider+'/'+d.model+'\\n'+
     'tokens              '+d.prompt_tokens+' in / '+d.completion_tokens+' out'+

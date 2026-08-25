@@ -114,10 +114,15 @@ def detail(stages: list[dict[str, Any]], *, full: bool) -> None:
                 f"  asked by  {s.get('principal_role')} in {s.get('tenant_id')}"
                 f"/{s.get('principal_department')}   as_of={s.get('as_of')}"
             )
-            print(f"  permitted {s.get('allowed_document_count')} documents (pre-ranking)")
+            chunk_ids = s.get("returned_chunk_ids", [])
+            # Chunks, not documents — a single document splits into many, so top-k
+            # chunks can all come from one. Printed together the two numbers look
+            # contradictory ("permitted 4, retrieved 5") unless the units are stated.
+            from_documents = len({c.split("#")[0] for c in chunk_ids})
+            print(f"  permitted {s.get('allowed_document_count')} documents (before ranking)")
             print(
-                f"  returned  {len(s.get('returned_chunk_ids', []))} chunks in "
-                f"{s.get('latency_ms', 0):.2f} ms"
+                f"  retrieved {len(chunk_ids)} chunks from {from_documents} of them "
+                f"in {s.get('latency_ms', 0):.2f} ms"
             )
             for ref, score in zip(
                 s.get("returned_citations", []), s.get("scores", []), strict=False

@@ -201,6 +201,7 @@ def ask(request: AskRequest) -> AskResponse:
         tenant_id=principal.tenant_id,
         permitted_documents=result.retrieval.allowed_document_count,
         retrieved_chunks=len(result.retrieval.chunks),
+        retrieved_from_documents=len({c.chunk.document_id for c in result.retrieval.chunks}),
         guardrail_actions=result.guardrail_actions,
         model=result.model,
         provider=result.provider,
