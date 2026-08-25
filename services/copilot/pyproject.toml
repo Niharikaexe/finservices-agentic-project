@@ -1,0 +1,26 @@
+[project]
+name = "copilot-service"
+version = "0.0.0"
+description = "Argus policy copilot: permission-aware RAG over the policy corpus"
+requires-python = ">=3.12"
+dependencies = [
+  "fsa-common", "fsa-authz", "fsa-retrieval", "fsa-guardrails",
+  "fsa-gateway", "fsa-telemetry",
+  "fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.9",
+  "prometheus-client>=0.20",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copilot_service"]
+
+[tool.uv.sources]
+fsa-common = { workspace = true }
+fsa-authz = { workspace = true }
+fsa-retrieval = { workspace = true }
+fsa-guardrails = { workspace = true }
+fsa-gateway = { workspace = true }
+fsa-telemetry = { workspace = true }

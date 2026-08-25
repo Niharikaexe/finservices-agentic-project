@@ -34,8 +34,16 @@ log = get_logger(__name__)
 
 
 def _pii_redactor(text: str) -> str:
-    """The default redactor: run the PII rail before anything is persisted."""
-    return scan_pii(text, direction="output").sanitised
+    """The default redactor: run the PII rail before anything is persisted.
+
+    `direction="log_scrub"` rather than `"output"` on purpose. Scrubbing runs once per
+    string field per record, so counting it as an output-rail evaluation made
+    `guardrail_trips_total{rail="pii",direction="output"}` a function of log volume —
+    it read 769 against 42 requests. That inflated series would have made
+    `GuardrailBypassSuspected` unable to fire for the PII rail no matter what, and it
+    poisoned the baseline `PromptInjectionSpike` compares against.
+    """
+    return scan_pii(text, direction="log_scrub").sanitised
 
 
 class BudgetExceededError(ArgusError):

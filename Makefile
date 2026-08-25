@@ -77,6 +77,14 @@ train-fraud:  ## Train + evaluate the fraud model (needs `make install-ml`)
 	$(UV) run --group ml python -m fsa_ml.cli train-fraud --world data/worlds/seed-$${SEED:-42} \
 	  --train-as-of 2026-09-01 --eval-as-of 2027-06-01
 
+.PHONY: serve
+serve:  ## Run the copilot service on :8080 (open http://localhost:8080 for live monitoring)
+	$(UV) run uvicorn copilot_service.app:app --port 8080 --reload
+
+.PHONY: traffic
+traffic:  ## Drive persona-driven traffic at a running service so the dashboards populate
+	$(UV) run python scripts/generate_traffic.py --requests $${N:-60}
+
 .PHONY: acl
 acl:  ## Run the ACL isolation suite (ARCHITECTURE.md §10)
 	$(UV) run pytest tests/authz/ -v

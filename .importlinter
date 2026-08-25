@@ -4,6 +4,7 @@
 # platform up.
 [importlinter]
 root_packages =
+    copilot_service
     fsa_common
     fsa_authz
     fsa_guardrails
@@ -20,6 +21,7 @@ root_packages =
 name = Shared packages sit below ml and simulator
 type = layers
 layers =
+    copilot_service
     fsa_evals
     fsa_ml : fsa_sim
     fsa_retrieval
@@ -32,6 +34,7 @@ name = fsa_common imports nothing from the rest of the repo
 type = forbidden
 source_modules = fsa_common
 forbidden_modules =
+    copilot_service
     fsa_authz
     fsa_guardrails
     fsa_retrieval
