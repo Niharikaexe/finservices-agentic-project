@@ -160,7 +160,9 @@ def main() -> None:
         fail("installed, but the packages do not import:\n" + verify.stderr[-1500:])
 
     if not (ROOT / ".env").exists() and (ROOT / ".env.example").exists():
-        (ROOT / ".env").write_text((ROOT / ".env.example").read_text(encoding="utf-8"))
+        (ROOT / ".env").write_text(
+            (ROOT / ".env.example").read_text(encoding="utf-8"), encoding="utf-8"
+        )
         print("\n  wrote .env from .env.example (gitignored — put your key in it)")
 
     activate = (

@@ -157,4 +157,4 @@ if __name__ == "__main__":
     out = main()
     print(json.dumps(out, indent=2))
     Path("data/metrics").mkdir(parents=True, exist_ok=True)
-    Path("data/metrics/guardrails.json").write_text(json.dumps(out, indent=2))
+    Path("data/metrics/guardrails.json").write_text(json.dumps(out, indent=2), encoding="utf-8")

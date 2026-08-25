@@ -174,4 +174,6 @@ if __name__ == "__main__":
     report = main()
     print(json.dumps(report, indent=2, default=str))
     Path("data/metrics").mkdir(parents=True, exist_ok=True)
-    Path("data/metrics/platform.json").write_text(json.dumps(report, indent=2, default=str))
+    Path("data/metrics/platform.json").write_text(
+        json.dumps(report, indent=2, default=str), encoding="utf-8"
+    )
