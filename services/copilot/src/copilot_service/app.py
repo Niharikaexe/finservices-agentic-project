@@ -87,6 +87,8 @@ def _provider() -> ModelProvider:
 
     log.warning("no GOOGLE_API_KEY set — using the deterministic echo provider")
     return EchoProvider(
+        # Match only the question, never the retrieved context — see EchoProvider.
+        match_after="BEGIN EMPLOYEE QUESTION",
         responses={
             # Enough to exercise the full parse → ground → rail path offline.
             "client entertainment": (
@@ -102,7 +104,7 @@ def _provider() -> ModelProvider:
                 '"quoted_span": "Meals: claims must not exceed"}], '
                 '"applicable_limit_minor": 200000, "confidence": 0.79}'
             ),
-        }
+        },
     )
 
 

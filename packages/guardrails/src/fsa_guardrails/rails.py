@@ -31,7 +31,20 @@ from fsa_telemetry.metrics import GUARDRAIL_LATENCY, GUARDRAIL_TRIPS
 
 _INJECTION_PATTERNS: dict[str, tuple[re.Pattern[str], ...]] = {
     "instruction_override": (
-        re.compile(r"\bignore\s+(all\s+)?(previous|prior|above)\s+instructions?\b", re.I),
+        # The qualifier is OPTIONAL. It used to be mandatory — `ignore (all )?(previous
+        # |prior|above) instructions` — so "ignore previous instructions" tripped and
+        # "ignore all instructions" walked through untouched. The simulator only ever
+        # generated the first phrasing, so the catch rate read 100% while a human
+        # writing the payload by hand got past on their first attempt. See ADR 0007:
+        # a rail measured only against the generator that produced its own test set
+        # measures the generator, not the rail.
+        re.compile(
+            r"\b(ignore|disregard|forget|override|bypass)\s+"
+            r"(?:(?:all|any|the|your|my|these|those|previous|prior|above|earlier|"
+            r"preceding|system|initial|original|prev)\s+){0,3}"
+            r"(instruction|rule|direction|prompt|guideline|constraint|restriction)s?\b",
+            re.I,
+        ),
         re.compile(r"\bdisregard\s+(the\s+)?\w+\s+(step|instruction|rule)", re.I),
         re.compile(r"\bnew\s+instruction\s*:", re.I),
         re.compile(r"\bset\s+outcome\s+to\b", re.I),

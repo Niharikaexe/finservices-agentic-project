@@ -15,6 +15,7 @@ line prints `**********`.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -103,9 +104,26 @@ class EchoProvider:
 
     name = "echo"
 
-    def __init__(self, model: str = "echo-1", responses: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        model: str = "echo-1",
+        responses: dict[str, str] | None = None,
+        *,
+        match_after: str | None = None,
+    ) -> None:
+        """`match_after` narrows needle matching to the text after that marker.
+
+        Without it, needles are matched against the whole prompt — including the
+        retrieved context. In a RAG prompt that is almost always wrong: every
+        retrieval for this corpus returns the global policy, which contains the words
+        "Client Entertainment", so a `client entertainment` needle matched no matter
+        what the user actually asked. The stub then returned the same canned answer to
+        every question from every user, which reads exactly like an authorisation
+        failure and is nothing of the sort.
+        """
         self.model = model
         self._responses = responses or {}
+        self._match_after = match_after
 
     def price_per_million(self) -> tuple[float, float]:
         return (0.0, 0.0)
@@ -120,12 +138,33 @@ class EchoProvider:
     ) -> Completion:
         del max_tokens, temperature, json_schema
         started = time.perf_counter()
+
+        haystack = prompt
+        if self._match_after is not None:
+            _, marker, tail = prompt.partition(self._match_after)
+            if marker:
+                haystack = tail
+
         for needle, response in self._responses.items():
-            if needle.lower() in prompt.lower():
+            if needle.lower() in haystack.lower():
                 text = response
                 break
         else:
-            text = "ECHO: " + prompt[-200:]
+            # A well-formed refusal, not a prose echo. The prose form parsed as
+            # nothing, so an unmatched question surfaced as `unparseable_output` —
+            # a model failure the model never had. Say plainly that this is a stub.
+            text = json.dumps(
+                {
+                    "answer": (
+                        "This is the offline stub provider. It has no canned answer "
+                        "for that question — set GOOGLE_API_KEY in .env for real "
+                        "answers."
+                    ),
+                    "citations": [{"document_id": "none", "rule_ref": "none", "quoted_span": ""}],
+                    "applicable_limit_minor": None,
+                    "confidence": 0.0,
+                }
+            )
         latency = (time.perf_counter() - started) * 1000
         return Completion(
             text=text,

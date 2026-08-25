@@ -148,3 +148,39 @@ def test_the_budget_still_binds_after_failures() -> None:
     # ExpensiveProvider charges $1 per token, so one call cannot fit a $0.50 day.
     with pytest.raises(BudgetExceededError):
         gateway.complete("good", "x" * 40, run_id=new_run_id(), prompt_template_id="t")
+
+
+def test_echo_matches_the_question_not_the_retrieved_context() -> None:
+    """The stub returned the same canned answer to every question from every user.
+
+    Needles were matched against the whole prompt, and every retrieval in this corpus
+    returns the global policy containing the words "Client Entertainment" — so a
+    `client entertainment` needle matched whatever was asked. Two users comparing
+    answers then saw identical output and read it as an authorisation leak. It was the
+    stub, but a demo that cannot tell those apart is worse than no demo.
+    """
+    prompt = (
+        "--- BEGIN POLICY EXCERPTS ---\n"
+        "[T&E-4.1] Client Entertainment: claims must not exceed Rs 5,000.\n"
+        "--- BEGIN EMPLOYEE QUESTION ---\n"
+        "What is the lodging cap?\n"
+    )
+    responses = {"client entertainment": "WRONG", "lodging": "RIGHT"}
+
+    scoped = EchoProvider(responses=responses, match_after="BEGIN EMPLOYEE QUESTION")
+    assert scoped.complete(prompt).text == "RIGHT"
+
+    # Unscoped is the old behaviour, kept because it is right for non-RAG callers.
+    assert EchoProvider(responses=responses).complete(prompt).text == "WRONG"
+
+
+def test_echo_with_no_match_returns_a_parseable_refusal() -> None:
+    """The old fallback echoed prose, which parsed as nothing — so an unmatched
+    question surfaced as `unparseable_output`, a model failure the model never had."""
+    import json
+
+    text = EchoProvider(responses={"nothing": "x"}).complete("an unrelated question").text
+    parsed = json.loads(text)
+    assert parsed["confidence"] == 0.0
+    assert "stub" in parsed["answer"].lower()
+    assert parsed["citations"], "the citations contract holds even for the stub"
