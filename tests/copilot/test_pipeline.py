@@ -7,6 +7,7 @@ suite that needs a credential is one that gets skipped when the credential rotat
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
@@ -16,8 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from build_authz_world import build
 
-from copilot_service.pipeline import PolicyPipeline
+from copilot_service.pipeline import _REFUSAL, PolicyPipeline
 from fsa_gateway import EchoProvider, ModelGateway, Route
+from fsa_gateway.provider import Completion
 from fsa_guardrails import scan_pii
 from fsa_telemetry import InteractionLog
 
@@ -151,3 +153,46 @@ def test_every_stage_is_logged_under_one_run_id(world) -> None:  # type: ignore[
     retrieval = next(r for r in run_records if r.kind == "retrieval")
     assert retrieval.allowed_document_count > 0  # type: ignore[union-attr]
     assert retrieval.returned_citations  # type: ignore[union-attr]
+
+
+class TruncatedProvider(EchoProvider):
+    """A reasoning model that spent its whole output budget thinking.
+
+    Not hypothetical: `gemini-3.6-flash` burned 515 output tokens answering a
+    two-excerpt policy question, most of them on reasoning that is never emitted. At
+    the route's original `max_tokens=700` a slightly longer context returns exactly
+    this — a well-formed response containing nothing.
+    """
+
+    name = "truncated"
+
+    def complete(self, prompt: str, **kwargs: object) -> Completion:  # type: ignore[override]
+        base = super().complete(prompt)  # type: ignore[arg-type]
+        return replace(base, text="", finish_reason="truncated_in_thinking")
+
+
+def test_thinking_that_eats_the_budget_is_not_reported_as_a_parse_failure(world) -> None:  # type: ignore[no-untyped-def]
+    """Both degrade to the same safe refusal — that part is not in question. What
+    matters is the reason attached, because the two have different fixes: raise
+    ARGUS_MAX_OUTPUT_TOKENS, versus go and debug the prompt or the parser. Collapsing
+    them costs an on-call engineer an hour in the wrong file."""
+    log = InteractionLog(redactor=lambda t: scan_pii(t, direction="log_scrub").sanitised)
+    gateway = ModelGateway(
+        {"policy_qa": Route("policy_qa", TruncatedProvider())}, interaction_log=log
+    )
+    pipeline = PolicyPipeline(
+        authz=world.authz, retriever=world.retriever, gateway=gateway, interaction_log=log
+    )
+    user = _employee_of(world, "Sales")
+    result = pipeline.ask(
+        "client entertainment limit", world.principal(user.user_id), as_of=MARCH, k=5
+    )
+
+    assert result.degraded
+    assert result.degraded_reason == "output_truncated"
+    # Naming the failure does not soften it: still the refusal, still no real rule
+    # cited. `min_length=1` on citations forces a sentinel rather than an empty list,
+    # so "did it answer" is checked on the text and on applicable_limit_minor.
+    assert result.answer.answer == _REFUSAL
+    assert result.answer.applicable_limit_minor is None
+    assert [c.rule_ref for c in result.answer.citations] == ["none"]

@@ -51,7 +51,7 @@ def _provider() -> ModelProvider:
     what they are looking at.
     """
     if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
-        model = os.environ.get("ARGUS_LLM_MODEL", "gemini-2.0-flash")
+        model = os.environ.get("ARGUS_LLM_MODEL", "gemini-3.6-flash")
         log.info("using Gemini", model=model)
         return GeminiProvider(model=model)
 
@@ -87,11 +87,28 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     world = build()
     interaction_log = InteractionLog(
         Path("data/interactions.jsonl"),
-        redactor=lambda t: scan_pii(t, direction="output").sanitised,
+        # `log_scrub`, not `output`. The redactor runs once per string field per
+        # record, so labelling it as an output-rail evaluation makes
+        # `guardrail_trips_total{rail="pii",direction="output"}` a function of log
+        # volume rather than of model behaviour — which is the series
+        # `GuardrailBypassSuspected` alerts on. Same bug as the one fixed in
+        # `ModelGateway._pii_redactor`; it had a second home here.
+        redactor=lambda t: scan_pii(t, direction="log_scrub").sanitised,
     )
     provider = _provider()
     gateway = ModelGateway(
-        {"policy_qa": Route("policy_qa", provider, max_tokens=700, max_cost_usd_per_call=0.02)},
+        {
+            "policy_qa": Route(
+                "policy_qa",
+                provider,
+                # Reasoning models draw thinking tokens from this same budget, and
+                # thinking runs *before* the first answer token. At 700 the model
+                # could spend the entire allowance reasoning and return an empty
+                # body, which the pipeline can only degrade. Size it for both.
+                max_tokens=int(os.environ.get("ARGUS_MAX_OUTPUT_TOKENS", "2048")),
+                max_cost_usd_per_call=0.02,
+            )
+        },
         interaction_log=interaction_log,
         daily_budget_usd=float(os.environ.get("ARGUS_DAILY_BUDGET_USD", "2.0")),
     )

@@ -223,6 +223,13 @@ class PolicyPipeline:
                 run_id=run_id,
                 prompt_template_id=PROMPT_TEMPLATE_ID,
                 tenant_id=principal.tenant_id,
+                # Constrain the decoder to the answer shape rather than asking the
+                # model nicely in the prompt. Providers that support this turn "the
+                # model returned prose and we degraded" from a routine event into an
+                # impossible one. Providers that do not simply ignore it, and the
+                # prompt's hand-written shape hint still applies — which is why that
+                # hint stays in `_PROMPT` rather than being deleted as redundant.
+                json_schema=PolicyAnswer.model_json_schema(),
             )
         except BudgetExceededError:
             return self._degraded(run_id, "budget_exceeded", retrieval, started, actions)
@@ -233,7 +240,16 @@ class PolicyPipeline:
         # ── 6. parse into the structured shape; one repair attempt ──────────
         answer = _parse(completion.text)
         if answer is None:
-            return self._degraded(run_id, "unparseable_output", retrieval, started, actions)
+            # A reasoning model that spends its whole output budget thinking returns
+            # an empty body. That is a capacity problem with a different fix — raise
+            # ARGUS_MAX_OUTPUT_TOKENS — so it gets its own reason rather than being
+            # filed under "the model wrote something we could not read".
+            reason = (
+                "output_truncated"
+                if completion.finish_reason in {"max_tokens", "truncated_in_thinking"}
+                else "unparseable_output"
+            )
+            return self._degraded(run_id, reason, retrieval, started, actions)
 
         # ── 7. citations must resolve to chunks we actually retrieved ───────
         retrieved_refs = {c.chunk.rule_ref for c in retrieval.chunks}

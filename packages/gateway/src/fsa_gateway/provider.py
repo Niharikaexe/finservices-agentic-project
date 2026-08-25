@@ -20,6 +20,19 @@ import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from fsa_common import ArgusError
+
+
+class ModelUnavailableError(ArgusError):
+    """The configured model id was rejected by the provider.
+
+    Distinct from a transient provider error because the remedy is different: this one
+    never succeeds on retry, it needs a config change.
+    """
+
+    http_status = 502
+    code = "model_unavailable"
+
 
 @dataclass(frozen=True, slots=True)
 class Completion:
@@ -106,6 +119,73 @@ class EchoProvider:
 
 # ── Gemini ──────────────────────────────────────────────────────────────────
 
+#: Keys Gemini's `responseSchema` accepts. It takes an OpenAPI 3.0 subset, not full
+#: JSON Schema, and rejects the request outright on an unknown key rather than
+#: ignoring it — so unsupported keys are dropped rather than passed through.
+_GEMINI_SCHEMA_KEYS = frozenset(
+    {
+        "type",
+        "format",
+        "description",
+        "nullable",
+        "enum",
+        "items",
+        "properties",
+        "required",
+        "minItems",
+        "maxItems",
+        "propertyOrdering",
+    }
+)
+
+
+def _to_gemini_schema(schema: dict[str, Any], defs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Translate a standard JSON Schema into Gemini's `responseSchema` dialect.
+
+    This lives on the provider, not on the caller, on purpose: the caller hands over
+    `PolicyAnswer.model_json_schema()` — one generic artefact derived from the model
+    that already governs the answer — and each provider bends it into its own dialect.
+    Put the translation upstream instead and the pipeline grows a `if provider ==`,
+    which is the vendor lock-in this package exists to avoid.
+
+    Three concrete impedance mismatches are handled. Pydantic emits nested models as
+    `$ref` into `$defs`, which Gemini does not resolve, so refs are inlined. Optional
+    fields become `anyOf: [T, null]`, which Gemini spells `nullable: true`. And
+    `min_length` on a list arrives as `minItems` but on a string as `minLength`, which
+    Gemini has no equivalent for — dropping it is safe because `PolicyAnswer` is still
+    validated by pydantic afterwards. The decoder constraint is an optimisation that
+    removes most parse failures; it is never the thing enforcing the contract.
+    """
+    defs = defs if defs is not None else schema.get("$defs", {})
+
+    if "$ref" in schema:
+        name = schema["$ref"].rsplit("/", 1)[-1]
+        return _to_gemini_schema(defs.get(name, {}), defs)
+
+    if "anyOf" in schema:
+        variants = [v for v in schema["anyOf"] if v.get("type") != "null"]
+        nullable = len(variants) != len(schema["anyOf"])
+        if len(variants) == 1:
+            out = _to_gemini_schema(variants[0], defs)
+            if nullable:
+                out["nullable"] = True
+            return out
+        # A genuine union. Gemini cannot express it, so fall back to an unconstrained
+        # value and let pydantic reject a bad one downstream.
+        return {"type": "string", "nullable": nullable}
+
+    out = {k: v for k, v in schema.items() if k in _GEMINI_SCHEMA_KEYS}
+    if "properties" in schema:
+        out["properties"] = {
+            name: _to_gemini_schema(sub, defs) for name, sub in schema["properties"].items()
+        }
+        # Gemini emits object keys in whatever order it likes unless told. Pinning the
+        # order makes the raw output stable, which makes an eval diff readable.
+        out["propertyOrdering"] = list(schema["properties"])
+    if "items" in schema:
+        out["items"] = _to_gemini_schema(schema["items"], defs)
+    return out
+
 
 class GeminiProvider:
     """Google Gemini over the REST API.
@@ -113,17 +193,30 @@ class GeminiProvider:
     The key comes from `GOOGLE_API_KEY` (or `GEMINI_API_KEY`) in the environment,
     loaded from a gitignored `.env` locally and from Key Vault in cloud. It is never a
     constructor argument, so it cannot end up in a stack trace or a config dump.
+
+    **This is a reasoning model, and that changes the accounting.** Gemini 3.x spends
+    "thinking" tokens before it emits an answer. They are reported separately as
+    `thoughtsTokenCount`, they are *billed as output tokens*, and they are drawn from
+    the same `maxOutputTokens` budget as the answer. A first live call here returned
+    `candidatesTokenCount: 1` alongside `thoughtsTokenCount: 70` — costing on the
+    former alone under-reports spend by the ratio between them, and a budget built on
+    that number does not bind. Both consequences are handled below.
+
+    Prices default high on purpose. Over-estimating the unit price makes the gateway's
+    pre-call reservation refuse *sooner* than reality requires, which is the safe
+    direction to be wrong in; under-estimating silently raises the real cap. Check
+    them against Google's current pricing page before quoting a figure to anyone.
     """
 
     name = "gemini"
 
     def __init__(
         self,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-3.6-flash",
         *,
-        input_price: float = 0.10,
-        output_price: float = 0.40,
-        timeout_seconds: float = 30.0,
+        input_price: float = 0.30,
+        output_price: float = 2.50,
+        timeout_seconds: float = 60.0,
     ) -> None:
         self.model = model
         self._input_price = input_price
@@ -164,7 +257,7 @@ class GeminiProvider:
             # asked nicely for JSON. This is what removes a whole class of parse-retry
             # logic, and it is the provider feature worth checking before you pick one.
             config["responseMimeType"] = "application/json"
-            config["responseSchema"] = json_schema
+            config["responseSchema"] = _to_gemini_schema(json_schema)
 
         started = time.perf_counter()
         response = httpx.post(
@@ -174,6 +267,18 @@ class GeminiProvider:
             timeout=self._timeout,
         )
         latency = (time.perf_counter() - started) * 1000
+
+        if response.status_code == 404:
+            # Google retires model ids and the REST error names the replacement. A bare
+            # HTTPStatusError here reaches the pipeline as a generic `provider_error`,
+            # so the service degrades every request to a refusal and the dashboard
+            # shows a healthy-looking system answering nothing. Surface the cause.
+            detail = response.json().get("error", {}).get("message", response.text[:200])
+            raise ModelUnavailableError(
+                "the configured Gemini model is not available to this key",
+                model=self.model,
+                detail=detail,
+            )
         response.raise_for_status()
         body = response.json()
 
@@ -187,10 +292,22 @@ class GeminiProvider:
 
         usage = body.get("usageMetadata", {})
         prompt_tokens = int(usage.get("promptTokenCount", 0))
-        completion_tokens = int(usage.get("candidatesTokenCount", 0))
+        # Thinking tokens are output tokens for billing, so they are output tokens for
+        # accounting. Folding them in here rather than at the call sites means the
+        # gateway's budget, the cost metric and the interaction log are all correct by
+        # construction, and none of them has to know this model reasons.
+        completion_tokens = int(usage.get("candidatesTokenCount", 0)) + int(
+            usage.get("thoughtsTokenCount", 0)
+        )
         cost = (
             prompt_tokens * self._input_price + completion_tokens * self._output_price
         ) / 1_000_000
+
+        if finish == "max_tokens" and not text.strip():
+            # The whole output budget went on thinking and nothing was emitted. Left
+            # alone this reads downstream as a malformed response, which sends you
+            # debugging the JSON parser instead of raising `max_tokens`. Name it.
+            finish = "truncated_in_thinking"
 
         return Completion(
             text=text,
