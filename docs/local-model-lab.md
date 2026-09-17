@@ -94,9 +94,17 @@ interview and you have already separated yourself from most candidates.
 ## 2. First run, and the Qwen3 trap
 
 ```bash
-llama-cli -m Qwen3-8B-Q4_K_M.gguf --jinja -c 8192 -fa on \
+llama-cli -m Qwen3-8B-Q4_K_M.gguf --jinja -c 8192 -fa on -ngl 99 \
   -p "Extract merchant, date and total as JSON: 'STARBUCKS #4412 03/14/26 TOTAL 18.45'"
 ```
+
+`-ngl 99` offloads every layer to the GPU — Metal on an Apple silicon Mac, CUDA on an
+NVIDIA box. Drop it for pure CPU. Add it to every `llama-cli`, `llama-server` and
+`llama-bench` invocation below; it is omitted from the rest of this document only to
+keep the commands readable. Check the load log for `offloaded 37/37 layers` (36 blocks
+plus the output layer) — a silent partial offload is the usual reason for
+disappointing tokens/sec, and it is the first thing to rule out before you conclude
+anything about quantization.
 
 `--jinja` is not optional for Qwen3. It makes llama.cpp use the model's own chat
 template, which is what implements Qwen3's hybrid thinking mode and its tool-call
